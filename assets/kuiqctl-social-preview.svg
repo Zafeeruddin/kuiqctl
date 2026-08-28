@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">kuiqctl</title>
+  <desc id="desc">Quick, persistent kubeadm clusters for changing networks</desc>
+  <defs>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#12a9be"/>
+      <stop offset="1" stop-color="#426fd5"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="#081a38"/>
+  <circle cx="245" cy="285" r="310" fill="#0d315a" opacity=".55"/>
+  <g transform="translate(115 155)">
+    <g fill="none" stroke="url(#mark)" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="286" height="210" rx="58" stroke-width="23"/>
+      <path d="m232 207 25 44h43l35 30" stroke-width="18"/>
+    </g>
+    <g fill="url(#mark)">
+      <circle cx="257" cy="251" r="17"/>
+      <circle cx="300" cy="251" r="17"/>
+      <circle cx="335" cy="281" r="17"/>
+    </g>
+    <path d="m60 72 55 43-55 43" fill="none" stroke="url(#mark)" stroke-width="23" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M139 151h76" fill="none" stroke="url(#mark)" stroke-width="23" stroke-linecap="round"/>
+  </g>
+  <text x="500" y="310" fill="#edf3ff" font-family="DejaVu Sans, sans-serif" font-size="132" font-weight="bold">kuiqctl</text>
+  <text x="505" y="380" fill="#9eb7df" font-family="DejaVu Sans, sans-serif" font-size="34">A quick, persistent kubeadm cluster</text>
+  <text x="505" y="425" fill="#9eb7df" font-family="DejaVu Sans, sans-serif" font-size="34">for changing networks.</text>
+</svg>

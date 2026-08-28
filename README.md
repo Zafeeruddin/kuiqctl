@@ -1,8 +1,16 @@
-# kuiqctl
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/kuiqctl-logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/kuiqctl-logo.svg">
+    <img alt="kuiqctl" src="assets/kuiqctl-logo.svg" width="720">
+  </picture>
+</h1>
 
-Create, recreate, inspect, and remove a persistent single-node Kubernetes
-cluster with a few commands. `kuiqctl` uses kubeadm, containerd, Calico, and
-systemd on Debian/Ubuntu hosts.
+<p align="center">
+  Create, recreate, inspect, and remove a persistent single-node Kubernetes cluster with a few commands.
+</p>
+
+`kuiqctl` uses kubeadm, containerd, Calico, and systemd on Debian/Ubuntu hosts.
 
 ## Quick start
 

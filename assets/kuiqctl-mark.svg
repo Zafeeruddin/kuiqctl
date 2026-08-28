@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">kuiqctl mark</title>
+  <desc id="desc">A terminal shaped like a lowercase q with a three-node tail</desc>
+  <defs>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#009bb5"/>
+      <stop offset="1" stop-color="#2452c7"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#mark)" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="56" y="72" width="350" height="260" rx="72" stroke-width="30"/>
+    <path d="m337 326 30 54h48l40 34" stroke-width="24"/>
+  </g>
+  <g fill="url(#mark)">
+    <circle cx="367" cy="380" r="22"/>
+    <circle cx="415" cy="380" r="22"/>
+    <circle cx="455" cy="414" r="22"/>
+  </g>
+  <path d="m116 161 65 56-65 56" fill="none" stroke="url(#mark)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M219 269h94" fill="none" stroke="url(#mark)" stroke-width="30" stroke-linecap="round"/>
+</svg>
