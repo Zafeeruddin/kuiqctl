@@ -1,0 +1,14 @@
+{
+  "cluster_name": "quick-prod",
+  "endpoint": "",
+  "kubernetes_minor": "1.37",
+  "calico_version": "v3.32.1",
+  "pod_cidr": "10.244.0.0/16",
+  "service_cidr": "10.96.0.0/12",
+  "stable_node_ip": "10.255.255.1",
+  "allowed_client_cidrs": [
+    "192.168.0.0/24",
+    "192.168.1.0/24"
+  ],
+  "network_poll_seconds": 15
+}

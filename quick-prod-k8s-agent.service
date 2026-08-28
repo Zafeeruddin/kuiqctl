@@ -1,0 +1,18 @@
+[Unit]
+Description=Quick Prod Kubernetes stable-address and network agent
+Documentation=https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/
+After=network-online.target
+Before=kubelet.service
+Wants=network-online.target
+ConditionPathExists=/etc/kubernetes/admin.conf
+
+[Service]
+Type=simple
+ExecStartPre=/sbin/swapoff -a
+ExecStartPre=/usr/local/bin/qpk agent --once
+ExecStart=/usr/local/bin/qpk agent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
