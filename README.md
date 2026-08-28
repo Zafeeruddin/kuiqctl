@@ -15,6 +15,7 @@ git clone <repository-url> quick-prod-k8s
 cd quick-prod-k8s
 sudo ./install.sh
 command -v kuiqctl
+sudo kuiqctl preflight
 sudo kuiqctl create
 sudo kuiqctl kubeconfig --output "$HOME/.kube/quick-prod.yaml"
 export KUBECONFIG="$HOME/.kube/quick-prod.yaml"
@@ -31,6 +32,21 @@ their current configured repositories. The default configuration permits API acc
 `192.168.0.0/24` (office) and `192.168.1.0/24` (home). Edit
 `/etc/kuiqctl/config.json` before creation to change those networks,
 cluster virtual networks, Kubernetes minor, name, or endpoint.
+
+Before `kubeadm init`—and before `recreate` resets an existing cluster—kuiqctl:
+
+1. Uses the exact installed kubeadm patch version instead of a network-resolved
+   `stable-X.Y` label.
+2. Verifies a default IPv4 route and DNS for the configured image registry and
+   GitHub manifest host.
+3. Downloads and validates the pinned Calico manifest into `/var/cache/kuiqctl`.
+4. Pre-pulls every Kubernetes and Calico image into containerd.
+
+Any DNS, route, proxy, authentication, registry, or download failure stops
+before destructive reset and reports the failed stage. For a corporate image
+mirror, set `image_repository` in `/etc/kuiqctl/config.json`; configure normal
+containerd registry mirrors/authentication when Calico images must also be
+mirrored.
 
 If Docker already installed `containerd.io`, kuiqctl reuses its `containerd`
 binary. It does not request Ubuntu's conflicting `containerd` package.
@@ -52,9 +68,30 @@ configuration, and systemd unit.
 ## Lifecycle commands
 
 ```bash
+sudo kuiqctl preflight
 sudo kuiqctl status
 sudo kuiqctl recreate --yes
 sudo kuiqctl remove --yes
+```
+
+`create` performs the same clean-host preflight automatically. If kubeadm/K3s
+state or ports 6443, 10257, 10259, 2379, or 2380 are present, it stops with the
+exact conflict and tells the operator to use `recreate`. It does not partially
+initialize over stale control-plane processes.
+
+`recreate` stops kubelet and resets every detected CRI socket, including CRI-O
+from an older cluster and the containerd default. It waits for the old
+control-plane ports to be released before starting `kubeadm init`; if an
+unrelated process still owns one, it reports the ports and an `ss` diagnostic
+command.
+
+For network failures, start with:
+
+```bash
+ip -4 route
+resolvectl status
+resolvectl query registry.k8s.io
+sudo kuiqctl preflight
 ```
 
 `recreate` and `remove` permanently delete workloads, Kubernetes objects, and

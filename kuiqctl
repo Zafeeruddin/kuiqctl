@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import ipaddress
 import json
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 CONFIG_PATH = pathlib.Path("/etc/kuiqctl/config.json")
@@ -24,7 +26,10 @@ ADMIN_CONF = pathlib.Path("/etc/kubernetes/admin.conf")
 KUBEADM_CONFIG = pathlib.Path("/etc/kubernetes/kuiqctl-kubeadm.yaml")
 LOCK_PATH = pathlib.Path("/run/lock/kuiqctl.lock")
 IP_STATE_PATH = pathlib.Path("/run/kuiqctl/primary-ip")
+CACHE_DIR = pathlib.Path("/var/cache/kuiqctl")
+CALICO_MANIFEST = CACHE_DIR / "calico.yaml"
 CRI_SOCKET = "unix:///run/containerd/containerd.sock"
+CONTROL_PLANE_PORTS = (6443, 10257, 10259, 2379, 2380)
 KUBERNETES_KEY_URL = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/Release.key"
 KUBERNETES_REPO = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/"
 
@@ -35,6 +40,7 @@ def defaults() -> dict:
         "endpoint": "",
         "kubernetes_minor": "1.37",
         "calico_version": "v3.32.1",
+        "image_repository": "registry.k8s.io",
         "pod_cidr": "10.244.0.0/16",
         "service_cidr": "10.96.0.0/12",
         "stable_node_ip": "10.255.255.1",
@@ -47,7 +53,14 @@ class KuiqctlError(RuntimeError):
     pass
 
 
-def run(cmd: list[str], *, check: bool = True, capture: bool = False, env=None):
+def run(
+    cmd: list[str],
+    *,
+    check: bool = True,
+    capture: bool = False,
+    env=None,
+    timeout: int | None = None,
+):
     return subprocess.run(
         cmd,
         check=check,
@@ -55,6 +68,7 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False, env=None):
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         env=env,
+        timeout=timeout,
     )
 
 
@@ -110,6 +124,14 @@ def validate_config(cfg: dict) -> None:
         r"v[0-9]+\.[0-9]+\.[0-9]+", cfg["calico_version"]
     ):
         raise KuiqctlError("calico_version must look like v3.32.1")
+    repository = cfg["image_repository"]
+    if (
+        not isinstance(repository, str)
+        or not repository.strip()
+        or "://" in repository
+        or any(character.isspace() for character in repository)
+    ):
+        raise KuiqctlError("image_repository must be a registry host/path without a URL scheme")
     if not isinstance(cfg["allowed_client_cidrs"], list):
         raise KuiqctlError("allowed_client_cidrs must be a JSON list")
     try:
@@ -172,6 +194,70 @@ def cluster_present() -> bool:
 
 def legacy_k3s_present() -> bool:
     return path_exists(pathlib.Path("/etc/rancher/k3s/k3s.yaml"))
+
+
+def occupied_control_plane_ports() -> list[int]:
+    occupied = []
+    for port in CONTROL_PLANE_PORTS:
+        probe = None
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("0.0.0.0", port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                occupied.append(port)
+            elif exc.errno not in {errno.EACCES, errno.EPERM}:
+                raise KuiqctlError(f"could not probe control-plane port {port}: {exc}") from exc
+        finally:
+            if probe is not None:
+                probe.close()
+    return occupied
+
+
+def clean_host_preflight() -> None:
+    ports = occupied_control_plane_ports()
+    reasons = []
+    if legacy_k3s_present():
+        reasons.append("legacy K3s state exists")
+    if cluster_present():
+        reasons.append("kubeadm state exists")
+    if ports:
+        reasons.append(f"control-plane ports are occupied: {', '.join(map(str, ports))}")
+    if reasons:
+        raise KuiqctlError(
+            "cannot create on this host because "
+            + "; ".join(reasons)
+            + ". Run 'sudo kuiqctl recreate --yes' to clean and rebuild it"
+        )
+
+
+def wait_for_control_plane_ports(timeout: int = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ports = occupied_control_plane_ports()
+        if not ports:
+            return
+        time.sleep(1)
+    raise KuiqctlError(
+        "recreate cleanup could not release control-plane ports "
+        + ", ".join(map(str, occupied_control_plane_ports()))
+        + "; inspect them with: sudo ss -ltnp"
+    )
+
+
+def available_cri_sockets() -> list[str]:
+    candidates = [
+        "/var/run/crio/crio.sock",
+        "/run/crio/crio.sock",
+        "/run/containerd/containerd.sock",
+    ]
+    sockets = []
+    for candidate in candidates:
+        resolved = str(pathlib.Path(candidate).resolve(strict=False))
+        value = f"unix://{resolved}"
+        if path_exists(pathlib.Path(candidate)) and value not in sockets:
+            sockets.append(value)
+    return sockets or [CRI_SOCKET]
 
 
 def download(url: str) -> bytes:
@@ -240,6 +326,14 @@ def package_stack_ready(cfg: dict) -> bool:
     return version.returncode == 0 and version.stdout.startswith(f"v{cfg['kubernetes_minor']}.")
 
 
+def installed_kubernetes_version() -> str:
+    result = run(["kubeadm", "version", "-o", "short"], capture=True)
+    version = result.stdout.strip()
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", version):
+        raise KuiqctlError(f"kubeadm returned an invalid version: {version!r}")
+    return version
+
+
 def prerequisite_packages() -> list[str]:
     packages = ["ca-certificates", "curl", "gpg", "avahi-daemon"]
     # Docker's containerd.io provides the same binary and conflicts with
@@ -261,14 +355,17 @@ def prepare_host(cfg: dict) -> None:
         run(["apt-get", "install", "-y", "kubelet", "kubeadm", "kubectl"])
         run(["apt-mark", "hold", "kubelet", "kubeadm", "kubectl"])
     pathlib.Path("/etc/modules-load.d/kuiqctl.conf").write_text("overlay\nbr_netfilter\n")
-    pathlib.Path("/etc/sysctl.d/99-kuiqctl.conf").write_text(
+    sysctl_path = pathlib.Path("/etc/sysctl.d/99-kuiqctl.conf")
+    sysctl_path.write_text(
         "net.bridge.bridge-nf-call-iptables = 1\n"
         "net.bridge.bridge-nf-call-ip6tables = 1\n"
         "net.ipv4.ip_forward = 1\n"
     )
     run(["modprobe", "overlay"])
     run(["modprobe", "br_netfilter"])
-    run(["sysctl", "--system"])
+    # Apply only the settings owned by kuiqctl. Replaying every host sysctl can
+    # fail on unrelated stale keys and produces pages of irrelevant output.
+    run(["sysctl", "--load", str(sysctl_path)])
     run(["swapoff", "-a"])
     configure_containerd()
     ensure_endpoint(cfg)
@@ -293,6 +390,7 @@ def yaml_string(value: str) -> str:
 def write_kubeadm_config(cfg: dict) -> None:
     KUBEADM_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     node_name = socket.gethostname().split(".")[0].lower()
+    kubernetes_version = installed_kubernetes_version()
     content = f"""# Managed by kuiqctl. Edit {CONFIG_PATH} instead.
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
@@ -311,7 +409,8 @@ apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 clusterName: {yaml_string(cfg['cluster_name'])}
 controlPlaneEndpoint: {yaml_string(cfg['stable_node_ip'] + ':6443')}
-kubernetesVersion: {yaml_string('stable-' + cfg['kubernetes_minor'])}
+kubernetesVersion: {yaml_string(kubernetes_version)}
+imageRepository: {yaml_string(cfg['image_repository'])}
 apiServer:
   certSANs:
     - {yaml_string(cfg['endpoint'])}
@@ -331,9 +430,133 @@ def kubectl(args: list[str], *, check: bool = True, capture: bool = False):
     return run(["kubectl", "--kubeconfig", str(ADMIN_CONF), *args], check=check, capture=capture)
 
 
-def install_calico(cfg: dict) -> None:
+def registry_hostname(repository: str) -> str:
+    parsed = urllib.parse.urlparse("//" + repository)
+    if not parsed.hostname:
+        raise KuiqctlError(f"cannot determine a hostname from image_repository {repository!r}")
+    return parsed.hostname
+
+
+def configured_nameservers() -> str:
+    try:
+        values = [
+            line.split()[1]
+            for line in pathlib.Path("/etc/resolv.conf").read_text().splitlines()
+            if line.strip().startswith("nameserver ") and len(line.split()) >= 2
+        ]
+    except OSError:
+        values = []
+    return ", ".join(values) or "unknown"
+
+
+def resolve_required_hosts(cfg: dict) -> None:
+    if not primary_ip():
+        raise KuiqctlError(
+            "network preflight failed: no usable default IPv4 route is available. "
+            "Reconnect the LAN/VPN or repair the default route before retrying. "
+            "No existing cluster state was reset"
+        )
+    hosts = [registry_hostname(cfg["image_repository"]), "raw.githubusercontent.com"]
+    for host in hosts:
+        try:
+            socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise KuiqctlError(
+                f"network preflight failed: DNS cannot resolve {host} using nameserver(s) "
+                f"{configured_nameservers()}. Fix DNS/VPN/firewall connectivity, or configure "
+                "a reachable image_repository. No existing cluster state was reset"
+            ) from exc
+
+
+def cache_calico_manifest(cfg: dict) -> None:
     url = f"https://raw.githubusercontent.com/projectcalico/calico/{cfg['calico_version']}/manifests/calico.yaml"
-    kubectl(["apply", "-f", url])
+    try:
+        data = download(url)
+    except KuiqctlError as exc:
+        raise KuiqctlError(
+            f"artifact preflight could not cache Calico from {url}: {exc}. "
+            "Check DNS, GitHub access, proxy/VPN policy, or preload the required artifacts. "
+            "No existing cluster state was reset"
+        ) from exc
+    if len(data) < 1000 or b"calico-node" not in data or b"kind:" not in data:
+        raise KuiqctlError(f"downloaded Calico manifest from {url} did not pass validation")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = CALICO_MANIFEST.with_suffix(".tmp")
+    temporary.write_bytes(data)
+    os.chmod(temporary, 0o644)
+    temporary.replace(CALICO_MANIFEST)
+
+
+def calico_images() -> list[str]:
+    images = set()
+    for line in CALICO_MANIFEST.read_text().splitlines():
+        match = re.match(r"^\s*image:\s*[\"']?([^\s\"']+)", line)
+        if match:
+            images.add(match.group(1))
+    if not images:
+        raise KuiqctlError("cached Calico manifest contains no container images")
+    return sorted(images)
+
+
+def artifact_failure(stage: str, output: str) -> KuiqctlError:
+    lowered = output.lower()
+    if "network is unreachable" in lowered:
+        hint = "the host has no usable route to its DNS server or registry"
+    elif "no such host" in lowered or "lookup " in lowered or "name or service not known" in lowered:
+        hint = f"DNS is failing; configured nameserver(s): {configured_nameservers()}"
+    elif "timeout" in lowered or "deadline exceeded" in lowered:
+        hint = "a firewall, proxy, VPN, or registry endpoint timed out"
+    elif "unauthorized" in lowered or "denied" in lowered:
+        hint = "the registry requires credentials or denied this image"
+    else:
+        hint = "check DNS, routing, proxy settings, registry credentials, and containerd logs"
+    detail_lines = [line.strip() for line in output.splitlines() if line.strip()]
+    detail = detail_lines[-1][:500] if detail_lines else "no command output"
+    return KuiqctlError(
+        f"artifact preflight failed while {stage}: {hint}. Last error: {detail}. "
+        "No existing cluster state was reset"
+    )
+
+
+def pull_required_images() -> None:
+    try:
+        result = run(
+            ["kubeadm", "config", "images", "pull", "--config", str(KUBEADM_CONFIG)],
+            check=False,
+            capture=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise artifact_failure("pulling Kubernetes images", "image pull timed out") from exc
+    if result.returncode != 0:
+        raise artifact_failure("pulling Kubernetes images", result.stderr + "\n" + result.stdout)
+    for image in calico_images():
+        try:
+            result = run(
+                ["crictl", "--runtime-endpoint", CRI_SOCKET, "pull", image],
+                check=False,
+                capture=True,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise artifact_failure(f"pulling Calico image {image}", "image pull timed out") from exc
+        if result.returncode != 0:
+            raise artifact_failure(f"pulling Calico image {image}", result.stderr + "\n" + result.stdout)
+
+
+def prepare_creation_artifacts(cfg: dict) -> None:
+    print("Preflighting DNS, Kubernetes images, and Calico artifacts...")
+    resolve_required_hosts(cfg)
+    cache_calico_manifest(cfg)
+    run(["kubeadm", "config", "validate", "--config", str(KUBEADM_CONFIG)])
+    pull_required_images()
+    print("Artifact preflight passed; all required manifests and images are available locally.")
+
+
+def install_calico(cfg: dict) -> None:
+    if not CALICO_MANIFEST.exists():
+        raise KuiqctlError("cached Calico manifest is missing; artifact preflight was not completed")
+    kubectl(["apply", "-f", str(CALICO_MANIFEST)])
     # Keep Calico independent of whichever DHCP address the LAN currently uses.
     kubectl(
         [
@@ -366,41 +589,97 @@ def enable_agent() -> None:
     run(["systemctl", "enable", "--now", "kuiqctl-agent.service"])
 
 
-def create(cfg: dict) -> None:
-    require_root()
-    with lifecycle_lock():
-        if legacy_k3s_present():
-            raise KuiqctlError("K3s is installed; run 'kuiqctl recreate --yes' to replace it with kubeadm")
-        if cluster_present():
-            raise KuiqctlError("a kubeadm cluster already exists; use 'kuiqctl recreate --yes'")
-        if not pathlib.Path("/run/systemd/system").exists():
-            raise KuiqctlError("systemd is required")
+def prepare_creation(cfg: dict) -> None:
+    if not pathlib.Path("/run/systemd/system").exists():
+        raise KuiqctlError("systemd is required")
+    try:
         prepare_host(cfg)
         configure_firewall(cfg)
         write_kubeadm_config(cfg)
-        print(f"Creating kubeadm cluster {cfg['cluster_name']} with Kubernetes {cfg['kubernetes_minor']}...")
-        run(["kubeadm", "config", "validate", "--config", str(KUBEADM_CONFIG)])
-        run(["kubeadm", "init", "--config", str(KUBEADM_CONFIG)])
-        install_calico(cfg)
-        wait_ready()
-        enable_agent()
-        print(f"Cluster is ready at https://{cfg['endpoint']}:6443")
-        print("Export its kubeconfig with: sudo kuiqctl kubeconfig --output ~/.kube/quick-prod.yaml")
+        prepare_creation_artifacts(cfg)
+    except subprocess.CalledProcessError as exc:
+        raise KuiqctlError(
+            f"host preparation failed before cluster reset: command exited {exc.returncode}: "
+            f"{' '.join(exc.cmd)}. Fix the reported package, service, DNS, or runtime error and retry; "
+            "no existing cluster state was reset"
+        ) from exc
+
+
+def initialize_cluster(cfg: dict) -> None:
+    version = installed_kubernetes_version()
+    print(f"Creating kubeadm cluster {cfg['cluster_name']} with Kubernetes {version}...")
+    try:
+        result = run(
+            ["kubeadm", "init", "--config", str(KUBEADM_CONFIG)],
+            check=False,
+            capture=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise KuiqctlError(
+            "kubeadm init exceeded 10 minutes. Inspect containerd and kubelet with "
+            "'sudo journalctl -u containerd -u kubelet -n 200'; then retry with "
+            "'sudo kuiqctl recreate --yes'"
+        ) from exc
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.returncode != 0:
+        output = result.stderr + "\n" + result.stdout
+        lowered = output.lower()
+        if "port-" in lowered or "port " in lowered and "in use" in lowered:
+            hint = "stale or unrelated processes still own required ports"
+        elif "imagepull" in lowered or "failed to pull" in lowered:
+            hint = "registry availability changed after artifact preflight"
+        elif "container runtime" in lowered or "cri" in lowered:
+            hint = "containerd/CRI is unhealthy; inspect 'sudo journalctl -u containerd -n 200'"
+        elif "swap" in lowered:
+            hint = "swap was re-enabled; inspect 'swapon --show'"
+        else:
+            hint = "inspect 'sudo journalctl -u kubelet -n 200' and 'sudo crictl ps -a'"
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        detail = lines[-1][:500] if lines else "kubeadm returned no error text"
+        raise KuiqctlError(
+            f"kubeadm initialization failed: {hint}. Last error: {detail}. "
+            "Partial state may exist; correct the cause and run 'sudo kuiqctl recreate --yes'"
+        )
+    install_calico(cfg)
+    wait_ready()
+    enable_agent()
+    print(f"Cluster is ready at https://{cfg['endpoint']}:6443")
+    print("Export its kubeconfig with: sudo kuiqctl kubeconfig --output ~/.kube/quick-prod.yaml")
+
+
+def create(cfg: dict) -> None:
+    require_root()
+    with lifecycle_lock():
+        clean_host_preflight()
+        prepare_creation(cfg)
+        initialize_cluster(cfg)
 
 
 def reset_cluster(cfg: dict, *, remove_alias: bool) -> None:
     run(["systemctl", "disable", "--now", "kuiqctl-agent.service"], check=False)
+    run(["systemctl", "stop", "kubelet"], check=False)
     if legacy_k3s_present():
         legacy_uninstaller = pathlib.Path("/usr/local/bin/k3s-uninstall.sh")
         if not legacy_uninstaller.exists():
             raise KuiqctlError("legacy K3s state exists but k3s-uninstall.sh is missing")
         run([str(legacy_uninstaller)])
-    if shutil.which("kubeadm") and cluster_present():
-        run(["kubeadm", "reset", "--force", "--cri-socket", CRI_SOCKET])
+    stale_ports = occupied_control_plane_ports()
+    if shutil.which("kubeadm") and (cluster_present() or stale_ports):
+        # A previous cluster may have used CRI-O while the new default is
+        # containerd. Reset every live CRI so old static Pods cannot retain
+        # scheduler/controller/etcd ports after the filesystem was cleaned.
+        for cri_socket in available_cri_sockets():
+            run(
+                ["kubeadm", "reset", "--force", "--cri-socket", cri_socket],
+                check=False,
+            )
     for path in [pathlib.Path("/etc/cni/net.d/10-calico.conflist"), pathlib.Path("/etc/cni/net.d/calico-kubeconfig")]:
         path.unlink(missing_ok=True)
     for interface in ["cni0", "tunl0", "vxlan.calico"]:
         run(["ip", "link", "delete", interface], check=False, capture=True)
+    wait_for_control_plane_ports()
     if remove_alias:
         run(["ip", "address", "delete", f"{cfg['stable_node_ip']}/32", "dev", "lo"], check=False, capture=True)
         run(["systemctl", "disable", "--now", "kubelet"], check=False)
@@ -419,12 +698,13 @@ def recreate(cfg: dict, yes: bool) -> None:
     require_root()
     if not yes:
         raise KuiqctlError("recreate destroys workloads and cluster data; repeat with --yes")
-    # Resolve repositories, packages and runtime configuration before deleting
-    # a working cluster. A dependency/download failure must not erase it first.
-    prepare_host(cfg)
     with lifecycle_lock():
+        # Resolve and locally cache every external dependency before deleting a
+        # working cluster. Network, DNS, mirror, or auth failures stop here.
+        prepare_creation(cfg)
         reset_cluster(cfg, remove_alias=False)
-    create(cfg)
+        clean_host_preflight()
+        initialize_cluster(cfg)
 
 
 def rewrite_kubeconfig(text: str, endpoint: str, cluster_name: str) -> str:
@@ -483,11 +763,23 @@ def status(cfg: dict) -> int:
     print(f"endpoint: https://{cfg['endpoint']}:6443")
     print(f"host-ip:  {primary_ip() or 'unavailable'}")
     print(f"node-ip:  {cfg['stable_node_ip']} (host-only, stable)")
+    occupied = occupied_control_plane_ports()
+    if occupied:
+        print(f"ports:    occupied control-plane ports: {', '.join(map(str, occupied))}")
     if legacy:
         print("legacy:   K3s state detected; use kuiqctl recreate --yes to migrate")
     if path_exists(ADMIN_CONF) and os.geteuid() == 0:
         return kubectl(["get", "nodes", "-o", "wide"], check=False).returncode
-    return 1 if cluster_present() or legacy else 0
+    return 1 if cluster_present() or legacy or occupied else 0
+
+
+def preflight(cfg: dict) -> None:
+    clean_host_preflight()
+    resolve_required_hosts(cfg)
+    print("Preflight passed: host is clean and required registry/manifest DNS names resolve.")
+    print(f"DNS nameserver(s): {configured_nameservers()}")
+    print(f"Planned cluster: {cfg['cluster_name']} (Kubernetes {cfg['kubernetes_minor']})")
+    print(f"Roaming endpoint: https://{cfg['endpoint']}:6443")
 
 
 def agent(cfg: dict, once: bool) -> None:
@@ -527,6 +819,7 @@ def parser() -> argparse.ArgumentParser:
     delete = commands.add_parser("remove", help="destroy and remove the cluster")
     delete.add_argument("--yes", action="store_true")
     commands.add_parser("status", help="show cluster and network status")
+    commands.add_parser("preflight", help="verify that create can start on this host")
     export = commands.add_parser("kubeconfig", help="export a roaming kubeconfig")
     export.add_argument("--output", "-o")
     internal = commands.add_parser("agent", help=argparse.SUPPRESS)
@@ -538,7 +831,7 @@ def parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command in {"create", "recreate", "remove", "kubeconfig", "agent", "init"}:
+        if args.command in {"create", "recreate", "remove", "kubeconfig", "agent", "init", "preflight"}:
             require_root()
         if args.command == "init":
             init_config(args.config)
@@ -552,6 +845,8 @@ def main(argv=None) -> int:
             remove(cfg, args.yes)
         elif args.command == "status":
             return status(cfg)
+        elif args.command == "preflight":
+            preflight(cfg)
         elif args.command == "kubeconfig":
             kubeconfig(cfg, args.output)
         elif args.command == "agent":

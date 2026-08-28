@@ -34,6 +34,18 @@ class ConfigTests(unittest.TestCase):
         with mock.patch.object(kuiqctl.shutil, "which", return_value=None):
             self.assertIn("containerd", kuiqctl.prerequisite_packages())
 
+    def test_create_preflight_points_stale_ports_to_recreate(self):
+        with (
+            mock.patch.object(kuiqctl, "occupied_control_plane_ports", return_value=[10257, 10259]),
+            mock.patch.object(kuiqctl, "cluster_present", return_value=False),
+            mock.patch.object(kuiqctl, "legacy_k3s_present", return_value=False),
+        ):
+            with self.assertRaisesRegex(
+                kuiqctl.KuiqctlError,
+                r"10257, 10259.*sudo kuiqctl recreate --yes",
+            ):
+                kuiqctl.clean_host_preflight()
+
     def test_rejects_overlapping_pod_and_service_networks(self):
         config = kuiqctl.defaults()
         config["endpoint"] = "server.local"
@@ -66,7 +78,8 @@ class KubeadmConfigTests(unittest.TestCase):
             original = kuiqctl.KUBEADM_CONFIG
             try:
                 kuiqctl.KUBEADM_CONFIG = pathlib.Path(directory) / "kubeadm.yaml"
-                kuiqctl.write_kubeadm_config(config)
+                with mock.patch.object(kuiqctl, "installed_kubernetes_version", return_value="v1.37.4"):
+                    kuiqctl.write_kubeadm_config(config)
                 rendered = kuiqctl.KUBEADM_CONFIG.read_text()
             finally:
                 kuiqctl.KUBEADM_CONFIG = original
@@ -74,6 +87,42 @@ class KubeadmConfigTests(unittest.TestCase):
         self.assertIn('advertiseAddress: "10.255.255.1"', rendered)
         self.assertIn('    - "server.local"', rendered)
         self.assertIn("taints: []", rendered)
+        self.assertIn('kubernetesVersion: "v1.37.4"', rendered)
+        self.assertIn('imageRepository: "registry.k8s.io"', rendered)
+
+
+class ArtifactPreflightTests(unittest.TestCase):
+    def test_network_failure_is_actionable_and_preserves_cluster(self):
+        error = kuiqctl.artifact_failure(
+            "pulling Kubernetes images",
+            "dial udp 8.8.8.8:53: connect: network is unreachable",
+        )
+        self.assertIn("no usable route", str(error))
+        self.assertIn("No existing cluster state was reset", str(error))
+
+    def test_missing_default_route_stops_network_preflight(self):
+        config = kuiqctl.defaults()
+        config["endpoint"] = "server.local"
+        with mock.patch.object(kuiqctl, "primary_ip", return_value=""):
+            with self.assertRaisesRegex(kuiqctl.KuiqctlError, "no usable default IPv4 route"):
+                kuiqctl.resolve_required_hosts(config)
+
+    def test_recreate_prepares_artifacts_before_reset(self):
+        config = kuiqctl.defaults()
+        config["endpoint"] = "server.local"
+        with (
+            mock.patch.object(kuiqctl, "require_root"),
+            mock.patch.object(kuiqctl, "lifecycle_lock", return_value=kuiqctl.contextlib.nullcontext()),
+            mock.patch.object(
+                kuiqctl,
+                "prepare_creation",
+                side_effect=kuiqctl.KuiqctlError("artifact unavailable"),
+            ),
+            mock.patch.object(kuiqctl, "reset_cluster") as reset,
+        ):
+            with self.assertRaisesRegex(kuiqctl.KuiqctlError, "artifact unavailable"):
+                kuiqctl.recreate(config, True)
+        reset.assert_not_called()
 
 
 if __name__ == "__main__":
