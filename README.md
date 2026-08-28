@@ -7,10 +7,25 @@
 </h1>
 
 <p align="center">
-  Create, recreate, inspect, and remove a persistent single-node Kubernetes cluster with a few commands.
+  <strong>Persistent kubeadm for machines that move.</strong>
 </p>
 
-`kuiqctl` uses kubeadm, containerd, Calico, and systemd on Debian/Ubuntu hosts.
+<p align="center">
+  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Zafeeruddin/kuiqctl?display_name=tag&sort=semver"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <img alt="Status: early stage" src="https://img.shields.io/badge/status-early%20stage-orange.svg">
+</p>
+
+Your kubeadm cluster should not break because you changed Wi-Fi. `kuiqctl`
+creates a persistent single-node Kubernetes cluster on Debian or Ubuntu with a
+stable internal node identity, so it can remain usable when the host moves
+between LANs or receives a different DHCP address.
+
+**kubeadm + containerd + Calico. No VM. No containerized Kubernetes nodes.**
+
+> [!IMPORTANT]
+> kuiqctl is an early-stage `v0.1` project. It is intended for a single Linux
+> host, not a high-availability or multi-node production control plane.
 
 ## Quick start
 
@@ -36,6 +51,23 @@ installation, `kuiqctl` can be run from any directory.
 
 Requires a Debian or Ubuntu host using systemd, root access through `sudo`, and
 an internet connection for Kubernetes packages and container images.
+
+## Why not minikube, kind, or k3s?
+
+These projects solve different problems. kuiqctl makes sense when you
+specifically want upstream kubeadm running directly on a persistent Linux host
+whose LAN address can change.
+
+| Tool | Primary use | How Kubernetes runs |
+| --- | --- | --- |
+| [kind](https://kind.sigs.k8s.io/) | Testing and CI | Kubernetes nodes inside containers |
+| [minikube](https://minikube.sigs.k8s.io/) | Local development and learning | VM, container, or bare-metal driver |
+| [k3s](https://k3s.io/) | Lightweight edge, homelab, and IoT clusters | k3s distribution |
+| **kuiqctl** | Persistent Linux host that moves between networks | kubeadm directly on the host |
+
+kuiqctl is not a general replacement for those tools. Choose it when the
+combination of upstream kubeadm, host-native services, persistence, and a
+changing network address is the point.
 
 ## Recreate or remove the cluster
 
@@ -122,6 +154,11 @@ Remote kubectl clients use the stable `<hostname>.local` TLS name, which mDNS
 maps to the machine's current LAN address. Internally, kubeadm, etcd, kubelet,
 and Calico use the host-only `stable_node_ip`. Moving between LANs therefore
 does not leave control-plane components bound to an old DHCP address.
+
+This follows kubeadm's
+[`controlPlaneEndpoint`](https://kubernetes.io/docs/reference/config-api/kubeadm-config.v1beta4/#kubeadm-k8s-io-v1beta4-ClusterConfiguration)
+model: a stable IP address or DNS name represents the control plane instead of
+the host's current interface address.
 
 Some managed, corporate, and guest networks block mDNS or isolate clients. On
 those networks, configure `endpoint` as a routed DNS name, Tailscale MagicDNS
