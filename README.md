@@ -30,13 +30,11 @@ between LANs or receives a different DHCP address.
 ## See it survive a network change
 
 <p align="center">
-  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4">
-    <img alt="kuiqctl keeps a kubeadm cluster Ready while moving from home Wi-Fi to an office LAN" src="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.gif" width="960">
-  </a>
+  <img alt="kuiqctl keeps a kubeadm cluster Ready while moving from home Wi-Fi to an office LAN" src="https://raw.githubusercontent.com/Zafeeruddin/kuiqctl/media/kuiqctl-demo.gif" width="960">
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4"><strong>▶ Open the full-quality 38-second demo</strong></a>
+  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4"><strong>⬇ Download the full-quality MP4</strong></a>
 </p>
 
 ## Quick start
