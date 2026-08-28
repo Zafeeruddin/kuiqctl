@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile Python
+        run: python -m py_compile kuiqctl tests/test_kuiqctl.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate shell syntax
+        run: bash -n install.sh uninstall.sh scripts/build-release.sh
+
+      - name: Validate configuration JSON
+        run: python -m json.tool config.example.json >/dev/null
+
+      - name: Smoke-test CLI
+        run: |
+          ./kuiqctl --help >/dev/null
+          ./kuiqctl --version
+
+      - name: Build and verify release archive
+        run: |
+          version=$(./kuiqctl --version | awk '{print $2}')
+          ./scripts/build-release.sh "$version" /tmp/kuiqctl-dist
+          cd /tmp/kuiqctl-dist
+          sha256sum --check "kuiqctl-v${version}.tar.gz.sha256"

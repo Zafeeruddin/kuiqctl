@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+dist/
 
 # Local launch-video sources and rendered cuts. The selected demo is published
 # as a GitHub release asset instead of being stored in Git history.

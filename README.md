@@ -14,6 +14,7 @@
   <a href="https://github.com/Zafeeruddin/kuiqctl/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Zafeeruddin/kuiqctl?display_name=tag&sort=semver"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <img alt="Status: early stage" src="https://img.shields.io/badge/status-early%20stage-orange.svg">
+  <a href="https://github.com/Zafeeruddin/kuiqctl/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/Zafeeruddin/kuiqctl/actions/workflows/ci.yml/badge.svg"></a>
 </p>
 
 Your kubeadm cluster should not break because you changed Wi-Fi. `kuiqctl`
@@ -30,17 +31,27 @@ between LANs or receives a different DHCP address.
 ## See it survive a network change
 
 <p align="center">
-  <img alt="kuiqctl keeps a kubeadm cluster Ready while moving from home Wi-Fi to an office LAN" src="https://raw.githubusercontent.com/Zafeeruddin/kuiqctl/media/kuiqctl-demo.gif" width="960">
+  <img alt="kuiqctl keeps a kubeadm cluster Ready while moving from home Wi-Fi to an office LAN" src="https://raw.githubusercontent.com/Zafeeruddin/kuiqctl/media/kuiqctl-demo.gif" width="840">
 </p>
 
 <p align="center">
   <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4"><strong>⬇ Download the full-quality MP4</strong></a>
 </p>
 
+```text
+Changing LAN IP
+        ↓
+hostname resolves to the current address
+        ↓
+Kubernetes continues using its stable internal node identity
+        ↓
+cluster remains Ready
+```
+
 ## Quick start
 
 ```bash
-git clone https://github.com/Zafeeruddin/kuiqctl.git
+git clone --branch v0.1.0 --depth 1 https://github.com/Zafeeruddin/kuiqctl.git
 cd kuiqctl
 sudo ./install.sh
 kuiqctl --version
@@ -61,6 +72,12 @@ installation, `kuiqctl` can be run from any directory.
 
 Requires a Debian or Ubuntu host using systemd, root access through `sudo`, and
 an internet connection for Kubernetes packages and container images.
+
+The tagged clone above is the simplest versioned installation. Starting with
+the next release, GitHub Releases will also contain a versioned install archive
+and matching `.sha256` file. Download both, verify with `sha256sum --check`,
+extract the archive, and run its `install.sh`. Clone the default branch only
+when testing unreleased development work.
 
 ## Why not minikube, kind, or k3s?
 
@@ -102,8 +119,26 @@ Other useful commands:
 ```bash
 sudo kuiqctl preflight
 sudo kuiqctl status
+sudo kuiqctl doctor
 journalctl -u kuiqctl-agent.service -f
 ```
+
+### Uninstall kuiqctl
+
+Remove the cluster first, then run the uninstall script from the same tagged
+source or release archive that was used for installation:
+
+```bash
+sudo kuiqctl remove --yes
+sudo ./uninstall.sh
+```
+
+The script refuses to continue while Kubernetes cluster markers remain. It
+removes the kuiqctl CLI, agent unit, and kuiqctl-owned runtime files, but keeps
+`/etc/kuiqctl/config.json` by default. Use `sudo ./uninstall.sh --purge-config`
+to remove that file too. It does not uninstall Kubernetes packages or
+containerd, restore containerd configuration, or delete unrelated CNI/runtime
+state.
 
 ## Architecture
 
@@ -204,6 +239,50 @@ Set `image_repository` when Kubernetes control-plane images must come from a
 corporate mirror. Configure containerd registry mirrors and credentials as
 usual when Calico images must also be mirrored.
 
+## What kuiqctl changes on the host
+
+`install.sh` installs `/usr/local/bin/kuiqctl`, the
+`kuiqctl-agent.service` systemd unit, and a public configuration file at
+`/etc/kuiqctl/config.json`. It preserves an existing config and keeps a backup
+when migrating the older project format.
+
+During `create` or `recreate`, kuiqctl makes these host-level changes:
+
+- Adds the Kubernetes apt signing key and minor-version repository under
+  `/etc/apt/keyrings` and `/etc/apt/sources.list.d`, then installs and holds
+  `kubeadm`, `kubelet`, and `kubectl` at matching versions.
+- Reuses an existing containerd, including Docker's `containerd.io`, when one
+  is installed. Otherwise it installs Debian/Ubuntu's `containerd` package.
+  Before generating a containerd config it saves the existing config once as
+  `/etc/containerd/config.toml.before-kuiqctl`, enables systemd cgroups, and
+  enables/restarts containerd.
+- Installs and enables `avahi-daemon` when the endpoint uses `.local`.
+- Loads `overlay` and `br_netfilter`, writes
+  `/etc/modules-load.d/kuiqctl.conf` and `/etc/sysctl.d/99-kuiqctl.conf`, and
+  enables bridge filtering and IPv4 forwarding.
+- Disables active swap. It does not edit `/etc/fstab`; the network watcher
+  keeps swap disabled while installed and running.
+- Adds `stable_node_ip/32` to loopback and enables the
+  `kuiqctl-agent.service` watcher so the address survives service restarts and
+  the current LAN address can change.
+- Writes generated kubeadm input to `/etc/kubernetes/kuiqctl-kubeadm.yaml`.
+  kubeadm then owns its normal state under `/etc/kubernetes`, `/var/lib/etcd`,
+  and `/var/lib/kubelet`.
+- Caches the pinned Calico manifest at `/var/cache/kuiqctl/calico.yaml` and
+  installs Calico's normal Kubernetes and CNI state.
+- When UFW is active, adds TCP/6443 allow rules for each configured
+  `allowed_client_cidrs` entry. It does not enable UFW.
+- Uses `/run/kuiqctl/primary-ip` for watcher state and
+  `/run/lock/kuiqctl.lock` to serialize lifecycle operations.
+
+`kuiqctl remove --yes` resets kubeadm/etcd state, removes the Calico files and
+interfaces it manages, removes the stable loopback address, and disables the
+kubelet and watcher. It deliberately preserves installed packages and holds,
+the Kubernetes apt repository/key, containerd and its config/backup, Avahi,
+UFW rules, kuiqctl's CLI/service/config, cached manifest, and host module/sysctl
+files. This makes recreation and inspection possible without silently undoing
+shared host configuration.
+
 ## Creation and safety workflow
 
 Before `kubeadm init`, kuiqctl:
@@ -230,12 +309,21 @@ old control-plane ports to close before initializing the replacement cluster.
 
 ## Troubleshooting
 
-Run the built-in checks first:
+Use `preflight` before creating a cluster; it intentionally rejects existing
+Kubernetes state. Use `doctor` to troubleshoot a cluster that is already
+created:
 
 ```bash
 sudo kuiqctl preflight
 sudo kuiqctl status
+sudo kuiqctl doctor
 ```
+
+`doctor` checks the configuration, services, loopback identity, current LAN
+address, roaming endpoint and mDNS, API readiness, node readiness/InternalIP,
+and Calico health. Important failures return a non-zero status and include a
+suggested next command. An unavailable `.local` resolution path is reported as
+a warning because some networks intentionally block mDNS.
 
 For network or registry failures:
 
@@ -256,6 +344,15 @@ sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -a
 Artifact failures are reported before cluster reset and classified as DNS,
 routing, timeout, proxy/firewall, authentication, or registry failures.
 
+## Current limitations
+
+- Single-node only; this is not a high-availability control plane.
+- IPv4 only.
+- Debian/Ubuntu hosts using systemd are currently supported.
+- `.local` endpoints depend on mDNS being available on the client network.
+- Remote workers require a routed stable control-plane endpoint and network
+  design; the local loopback identity alone is not reachable from another host.
+
 ## Implementation
 
 The orchestration workflow is implemented in the repository's `kuiqctl` Python
@@ -269,5 +366,4 @@ executable and does not depend on Ansible:
 - `create()` and `recreate()` enforce the safe lifecycle ordering.
 
 This is a quick single-host cluster, not a high-availability control plane. A
-host failure stops the cluster, and adding remote worker nodes requires a
-routed stable control-plane design.
+host failure stops the cluster.

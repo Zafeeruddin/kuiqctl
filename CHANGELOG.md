@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Add `kuiqctl doctor` for actionable checks of an existing cluster, its
+  stable node identity, roaming endpoint, services, API, node, and Calico.
+- Add a guarded `uninstall.sh` that preserves configuration by default and
+  refuses to run while cluster state exists.
+- Add CI for Python, unit, shell, configuration, CLI, and release-archive
+  validation.
+- Prepare reproducible tagged release archives with SHA256 checksums.
+- Document host changes, removal and uninstall boundaries, limitations, and
+  contributor and security reporting workflows.
+
 ## v0.1.0 - 2026-08-28
 
 First public release.

@@ -1,6 +1,9 @@
 import importlib.machinery
 import importlib.util
+import io
+import json
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -123,6 +126,168 @@ class ArtifactPreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(kuiqctl.KuiqctlError, "artifact unavailable"):
                 kuiqctl.recreate(config, True)
         reset.assert_not_called()
+
+
+class DoctorTests(unittest.TestCase):
+    NODE_JSON = json.dumps(
+        {
+            "items": [
+                {
+                    "metadata": {"name": "node-1"},
+                    "status": {
+                        "addresses": [
+                            {"type": "InternalIP", "address": "10.255.255.1"},
+                            {"type": "Hostname", "address": "node-1"},
+                        ],
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                    },
+                }
+            ]
+        }
+    )
+    CALICO_JSON = json.dumps(
+        {
+            "status": {
+                "desiredNumberScheduled": 1,
+                "numberReady": 1,
+                "numberUnavailable": 0,
+            }
+        }
+    )
+
+    def write_config(self, directory: str) -> pathlib.Path:
+        config = kuiqctl.defaults()
+        config["endpoint"] = "node.local"
+        path = pathlib.Path(directory) / "config.json"
+        path.write_text(json.dumps(config))
+        return path
+
+    def kubectl_result(self, args, **_kwargs):
+        if args == ["get", "--raw=/readyz"]:
+            return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+        if args == ["get", "nodes", "-o", "json"]:
+            return subprocess.CompletedProcess(args, 0, stdout=self.NODE_JSON, stderr="")
+        if args == ["-n", "kube-system", "get", "daemonset", "calico-node", "-o", "json"]:
+            return subprocess.CompletedProcess(args, 0, stdout=self.CALICO_JSON, stderr="")
+        raise AssertionError(f"unexpected kubectl arguments: {args}")
+
+    def test_node_health_reports_ready_stable_node(self):
+        name, ready, addresses = kuiqctl.node_health(self.NODE_JSON, "10.255.255.1")
+        self.assertEqual(name, "node-1")
+        self.assertTrue(ready)
+        self.assertEqual(addresses, ["10.255.255.1"])
+
+    def test_calico_health_requires_every_desired_pod(self):
+        healthy, detail = kuiqctl.calico_health(self.CALICO_JSON)
+        self.assertTrue(healthy)
+        self.assertEqual(detail, "1/1 calico-node pods Ready")
+        unhealthy = json.dumps(
+            {"status": {"desiredNumberScheduled": 1, "numberReady": 0, "numberUnavailable": 1}}
+        )
+        self.assertFalse(kuiqctl.calico_health(unhealthy)[0])
+
+    def test_stable_ip_on_loopback_parses_ip_output(self):
+        result = subprocess.CompletedProcess(
+            ["ip"],
+            0,
+            stdout="1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+            "1: lo    inet 10.255.255.1/32 scope global lo\\       valid_lft forever\n",
+            stderr="",
+        )
+        with mock.patch.object(kuiqctl, "run", return_value=result):
+            self.assertTrue(kuiqctl.stable_ip_on_loopback("10.255.255.1"))
+            self.assertFalse(kuiqctl.stable_ip_on_loopback("10.255.255.2"))
+
+    def test_doctor_rejects_invalid_config_before_host_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "config.json"
+            config_path.write_text(json.dumps({"unexpected": True}))
+            output = io.StringIO()
+            with (
+                mock.patch.object(kuiqctl, "require_root"),
+                mock.patch.object(kuiqctl, "service_active") as service_active,
+                mock.patch("sys.stdout", new=output),
+            ):
+                result = kuiqctl.doctor(config_path)
+        self.assertEqual(result, 1)
+        self.assertIn("[FAIL] config", output.getvalue())
+        self.assertIn("unknown configuration keys", output.getvalue())
+        service_active.assert_not_called()
+
+    def test_doctor_reports_healthy_cluster(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory)
+            admin_conf = pathlib.Path(directory) / "admin.conf"
+            admin_conf.write_text("apiVersion: v1\n")
+            output = io.StringIO()
+            with (
+                mock.patch.object(kuiqctl, "require_root"),
+                mock.patch.object(kuiqctl, "ADMIN_CONF", admin_conf),
+                mock.patch.object(kuiqctl, "service_active", return_value=True),
+                mock.patch.object(kuiqctl, "stable_ip_on_loopback", return_value=True),
+                mock.patch.object(kuiqctl, "primary_ip", return_value="192.168.1.20"),
+                mock.patch.object(kuiqctl, "resolve_ipv4", return_value=["192.168.1.20"]),
+                mock.patch.object(kuiqctl, "tcp_port_open", return_value=True),
+                mock.patch.object(kuiqctl.shutil, "which", return_value="/usr/bin/kubectl"),
+                mock.patch.object(kuiqctl, "kubectl", side_effect=self.kubectl_result),
+                mock.patch("sys.stdout", new=output),
+            ):
+                result = kuiqctl.doctor(config_path)
+        rendered = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("[OK] config", rendered)
+        self.assertIn("[OK] node Ready", rendered)
+        self.assertIn("[OK] node InternalIP", rendered)
+        self.assertIn("[OK] Calico", rendered)
+        self.assertIn("Cluster healthy.", rendered)
+
+    def test_doctor_treats_unavailable_mdns_as_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory)
+            admin_conf = pathlib.Path(directory) / "admin.conf"
+            admin_conf.write_text("apiVersion: v1\n")
+            output = io.StringIO()
+            with (
+                mock.patch.object(kuiqctl, "require_root"),
+                mock.patch.object(kuiqctl, "ADMIN_CONF", admin_conf),
+                mock.patch.object(kuiqctl, "service_active", return_value=True),
+                mock.patch.object(kuiqctl, "stable_ip_on_loopback", return_value=True),
+                mock.patch.object(kuiqctl, "primary_ip", return_value="192.168.1.20"),
+                mock.patch.object(kuiqctl, "resolve_ipv4", side_effect=OSError("mDNS unavailable")),
+                mock.patch.object(kuiqctl, "tcp_port_open", return_value=True),
+                mock.patch.object(kuiqctl.shutil, "which", return_value="/usr/bin/kubectl"),
+                mock.patch.object(kuiqctl, "kubectl", side_effect=self.kubectl_result),
+                mock.patch("sys.stdout", new=output),
+            ):
+                result = kuiqctl.doctor(config_path)
+        rendered = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("[WARN] endpoint", rendered)
+        self.assertIn("resolvectl query node.local", rendered)
+        self.assertIn("Cluster healthy, with 1 warning(s).", rendered)
+
+    def test_doctor_failures_are_actionable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory)
+            output = io.StringIO()
+            with (
+                mock.patch.object(kuiqctl, "require_root"),
+                mock.patch.object(kuiqctl, "ADMIN_CONF", pathlib.Path(directory) / "missing.conf"),
+                mock.patch.object(kuiqctl, "service_active", return_value=False),
+                mock.patch.object(kuiqctl, "stable_ip_on_loopback", return_value=False),
+                mock.patch.object(kuiqctl, "primary_ip", return_value=""),
+                mock.patch.object(kuiqctl, "resolve_ipv4", side_effect=OSError("mDNS unavailable")),
+                mock.patch.object(kuiqctl, "tcp_port_open", return_value=False),
+                mock.patch.object(kuiqctl.shutil, "which", return_value=None),
+                mock.patch("sys.stdout", new=output),
+            ):
+                result = kuiqctl.doctor(config_path)
+        rendered = output.getvalue()
+        self.assertNotEqual(result, 0)
+        self.assertIn("[FAIL] containerd", rendered)
+        self.assertIn("Action: sudo systemctl restart containerd", rendered)
+        self.assertIn("[FAIL] stable node IP", rendered)
+        self.assertIn("Cluster unhealthy", rendered)
 
 
 if __name__ == "__main__":

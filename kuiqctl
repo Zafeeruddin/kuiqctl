@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 
-__version__ = "0.1.0"
+__version__ = "0.1.1-dev"
 
 CONFIG_PATH = pathlib.Path("/etc/kuiqctl/config.json")
 ADMIN_CONF = pathlib.Path("/etc/kubernetes/admin.conf")
@@ -429,8 +429,19 @@ networking:
     temporary.replace(KUBEADM_CONFIG)
 
 
-def kubectl(args: list[str], *, check: bool = True, capture: bool = False):
-    return run(["kubectl", "--kubeconfig", str(ADMIN_CONF), *args], check=check, capture=capture)
+def kubectl(
+    args: list[str],
+    *,
+    check: bool = True,
+    capture: bool = False,
+    timeout: int | None = None,
+):
+    return run(
+        ["kubectl", "--kubeconfig", str(ADMIN_CONF), *args],
+        check=check,
+        capture=capture,
+        timeout=timeout,
+    )
 
 
 def registry_hostname(repository: str) -> str:
@@ -755,6 +766,301 @@ def primary_ip() -> str:
             sock.close()
 
 
+def stable_ip_on_loopback(address: str) -> bool:
+    result = run(["ip", "-4", "-o", "address", "show", "dev", "lo"], check=False, capture=True)
+    if result.returncode != 0:
+        return False
+    return any(
+        match.group(1) == address
+        for match in re.finditer(r"\binet\s+([0-9.]+)/[0-9]+", result.stdout)
+    )
+
+
+def resolve_ipv4(host: str) -> list[str]:
+    return sorted(
+        {
+            item[4][0]
+            for item in socket.getaddrinfo(host, 6443, family=socket.AF_INET, type=socket.SOCK_STREAM)
+        }
+    )
+
+
+def tcp_port_open(host: str, port: int, timeout: float = 3.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def node_health(payload: str, stable_ip: str) -> tuple[str, bool, list[str]]:
+    data = json.loads(payload)
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("Kubernetes returned no nodes")
+    node = next(
+        (
+            item
+            for item in items
+            if stable_ip
+            in [
+                address.get("address")
+                for address in item.get("status", {}).get("addresses", [])
+                if address.get("type") == "InternalIP"
+            ]
+        ),
+        items[0],
+    )
+    name = node.get("metadata", {}).get("name") or "unknown"
+    conditions = node.get("status", {}).get("conditions", [])
+    ready = any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in conditions
+    )
+    internal_ips = [
+        address.get("address")
+        for address in node.get("status", {}).get("addresses", [])
+        if address.get("type") == "InternalIP" and address.get("address")
+    ]
+    return name, ready, internal_ips
+
+
+def calico_health(payload: str) -> tuple[bool, str]:
+    data = json.loads(payload)
+    status_data = data.get("status", {})
+    desired = status_data.get("desiredNumberScheduled", 0)
+    ready = status_data.get("numberReady", 0)
+    unavailable = status_data.get("numberUnavailable", 0)
+    healthy = isinstance(desired, int) and desired > 0 and ready == desired and unavailable in {0, None}
+    return healthy, f"{ready}/{desired} calico-node pods Ready"
+
+
+def doctor(config_path: pathlib.Path) -> int:
+    require_root()
+    print("kuiqctl doctor\n")
+    failures = 0
+    warnings = 0
+
+    def report(level: str, label: str, detail: str = "", action: str = "") -> None:
+        nonlocal failures, warnings
+        if level == "FAIL":
+            failures += 1
+        elif level == "WARN":
+            warnings += 1
+        suffix = f"  {detail}" if detail else ""
+        print(f"[{level}] {label:<22}{suffix}")
+        if action:
+            print(f"       Action: {action}")
+
+    if not path_exists(config_path):
+        report(
+            "FAIL",
+            "config",
+            f"{config_path} is missing",
+            "reinstall kuiqctl or run 'sudo kuiqctl init' with the intended --config path",
+        )
+        print("\nCluster unhealthy: configuration is unavailable.")
+        return 1
+    try:
+        cfg = load_config(config_path)
+    except KuiqctlError as exc:
+        report("FAIL", "config", str(exc), f"correct {config_path} and rerun doctor")
+        print("\nCluster unhealthy: configuration is invalid.")
+        return 1
+    report("OK", "config", str(config_path))
+
+    services = (
+        ("containerd", "containerd", "sudo systemctl restart containerd; sudo journalctl -u containerd -n 100"),
+        ("kubelet", "kubelet", "sudo systemctl restart kubelet; sudo journalctl -u kubelet -n 100"),
+        (
+            "kuiqctl-agent.service",
+            "network watcher",
+            "sudo systemctl restart kuiqctl-agent.service; sudo journalctl -u kuiqctl-agent.service -n 100",
+        ),
+    )
+    for unit, label, action in services:
+        if service_active(unit):
+            report("OK", label, "running")
+        else:
+            report("FAIL", label, "not running", action)
+
+    stable_ip = cfg["stable_node_ip"]
+    if stable_ip_on_loopback(stable_ip):
+        report("OK", "stable node IP", stable_ip)
+    else:
+        report(
+            "FAIL",
+            "stable node IP",
+            f"{stable_ip} is missing from loopback",
+            "sudo systemctl restart kuiqctl-agent.service",
+        )
+
+    lan_ip = primary_ip()
+    if lan_ip:
+        report("OK", "current LAN IP", lan_ip)
+    else:
+        report(
+            "FAIL",
+            "current LAN IP",
+            "no default-route IPv4 address found",
+            "reconnect the LAN/VPN and inspect 'ip -4 route'",
+        )
+
+    endpoint = cfg["endpoint"]
+    endpoint_addresses: list[str] = []
+    try:
+        endpoint_addresses = resolve_ipv4(endpoint)
+    except OSError:
+        endpoint_addresses = []
+    if endpoint_addresses:
+        mapping = f"{endpoint} -> {', '.join(endpoint_addresses)}"
+        if lan_ip and lan_ip not in endpoint_addresses:
+            report(
+                "WARN",
+                "endpoint",
+                f"{mapping}; current LAN IP is {lan_ip}",
+                "restart avahi-daemon or update the endpoint's DNS record",
+            )
+        else:
+            report("OK", "endpoint", mapping)
+        if tcp_port_open(endpoint, 6443):
+            report("OK", "endpoint port", f"{endpoint}:6443 reachable")
+        else:
+            report(
+                "FAIL",
+                "endpoint port",
+                f"{endpoint}:6443 is not reachable",
+                "check kube-apiserver, host firewall, and allowed_client_cidrs",
+            )
+    elif endpoint.lower().endswith(".local"):
+        report(
+            "WARN",
+            "endpoint",
+            f"{endpoint} does not resolve through mDNS",
+            f"sudo systemctl restart avahi-daemon; resolvectl query {endpoint}",
+        )
+    else:
+        report(
+            "FAIL",
+            "endpoint",
+            f"{endpoint} does not resolve",
+            "repair the configured DNS record or change endpoint in the kuiqctl config",
+        )
+
+    if tcp_port_open(stable_ip, 6443):
+        report("OK", "control-plane port", f"{stable_ip}:6443 reachable")
+    else:
+        report(
+            "FAIL",
+            "control-plane port",
+            f"{stable_ip}:6443 is not reachable",
+            "inspect 'sudo journalctl -u kubelet -n 100' and kube-apiserver containers",
+        )
+
+    kubeconfig_ready = path_exists(ADMIN_CONF)
+    if kubeconfig_ready:
+        report("OK", "admin kubeconfig", str(ADMIN_CONF))
+    else:
+        report(
+            "FAIL",
+            "admin kubeconfig",
+            f"{ADMIN_CONF} is missing",
+            "if the cluster was removed, run 'sudo kuiqctl create'; otherwise inspect /etc/kubernetes",
+        )
+
+    kubectl_ready = bool(shutil.which("kubectl")) and kubeconfig_ready
+    if kubectl_ready:
+        try:
+            api = kubectl(["get", "--raw=/readyz"], check=False, capture=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            api = None
+        if api is not None and api.returncode == 0 and api.stdout.strip() == "ok":
+            report("OK", "Kubernetes API", "/readyz returned ok")
+        else:
+            report(
+                "FAIL",
+                "Kubernetes API",
+                "/readyz did not return ok",
+                "sudo journalctl -u kubelet -n 100; sudo crictl ps -a",
+            )
+
+        try:
+            nodes = kubectl(["get", "nodes", "-o", "json"], check=False, capture=True, timeout=10)
+            if nodes.returncode != 0:
+                raise ValueError(nodes.stderr.strip() or "kubectl get nodes failed")
+            node_name, ready, internal_ips = node_health(nodes.stdout, stable_ip)
+            if ready:
+                report("OK", "node Ready", node_name)
+            else:
+                report(
+                    "FAIL",
+                    "node Ready",
+                    f"{node_name} is not Ready",
+                    f"kubectl describe node {node_name}; sudo journalctl -u kubelet -n 100",
+                )
+            if stable_ip in internal_ips:
+                report("OK", "node InternalIP", stable_ip)
+            else:
+                shown = ", ".join(internal_ips) or "none"
+                report(
+                    "FAIL",
+                    "node InternalIP",
+                    f"expected {stable_ip}; found {shown}",
+                    "check kubelet node-ip configuration and restart kubelet",
+                )
+        except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError) as exc:
+            report(
+                "FAIL",
+                "node status",
+                str(exc),
+                "kubectl get nodes -o wide; sudo journalctl -u kubelet -n 100",
+            )
+
+        try:
+            calico = kubectl(
+                ["-n", "kube-system", "get", "daemonset", "calico-node", "-o", "json"],
+                check=False,
+                capture=True,
+                timeout=10,
+            )
+            if calico.returncode != 0:
+                raise ValueError(calico.stderr.strip() or "calico-node daemonset was not found")
+            healthy, detail = calico_health(calico.stdout)
+            if healthy:
+                report("OK", "Calico", detail)
+            else:
+                report(
+                    "FAIL",
+                    "Calico",
+                    detail,
+                    "kubectl -n kube-system get pods -l k8s-app=calico-node -o wide",
+                )
+        except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError) as exc:
+            report(
+                "FAIL",
+                "Calico",
+                str(exc),
+                "kubectl -n kube-system get daemonset,pods -l k8s-app=calico-node -o wide",
+            )
+    else:
+        reason = "kubectl is missing" if not shutil.which("kubectl") else "admin kubeconfig is missing"
+        for label, action in (
+            ("Kubernetes API", "install kubectl and restore /etc/kubernetes/admin.conf"),
+            ("node status", "restore API access, then run 'kubectl get nodes -o wide'"),
+            ("Calico", "restore API access, then inspect the calico-node daemonset"),
+        ):
+            report("FAIL", label, f"check skipped: {reason}", action)
+
+    if failures:
+        print(f"\nCluster unhealthy: {failures} important check(s) failed and {warnings} warning(s) reported.")
+        return 1
+    if warnings:
+        print(f"\nCluster healthy, with {warnings} warning(s).")
+    else:
+        print("\nCluster healthy.")
+    return 0
+
+
 def status(cfg: dict) -> int:
     kubelet = service_active("kubelet")
     watcher = service_active("kuiqctl-agent.service")
@@ -824,6 +1130,7 @@ def parser() -> argparse.ArgumentParser:
     delete.add_argument("--yes", action="store_true")
     commands.add_parser("status", help="show cluster and network status")
     commands.add_parser("preflight", help="verify that create can start on this host")
+    commands.add_parser("doctor", help="diagnose an existing cluster")
     export = commands.add_parser("kubeconfig", help="export a roaming kubeconfig")
     export.add_argument("--output", "-o")
     internal = commands.add_parser("agent", help=argparse.SUPPRESS)
@@ -835,11 +1142,13 @@ def parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command in {"create", "recreate", "remove", "kubeconfig", "agent", "init", "preflight"}:
+        if args.command in {"create", "recreate", "remove", "kubeconfig", "agent", "init", "preflight", "doctor"}:
             require_root()
         if args.command == "init":
             init_config(args.config)
             return 0
+        if args.command == "doctor":
+            return doctor(args.config)
         cfg = load_config(args.config)
         if args.command == "create":
             create(cfg)

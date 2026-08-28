@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible kuiqctl failure
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Never include credentials, tokens, certificates, private keys, or kubeconfig contents. Redact identifying network details when needed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the command, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: kuiqctl version
+      placeholder: Output of kuiqctl --version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: Debian/Ubuntu release and architecture
+    validations:
+      required: true
+  - type: input
+    id: kubernetes
+    attributes:
+      label: Kubernetes version
+      placeholder: kubeadm version or kubectl version
+  - type: textarea
+    id: network
+    attributes:
+      label: Network environment
+      description: Describe LAN/VPN/DNS/mDNS and whether the host recently changed networks. Redact sensitive values.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste sudo kuiqctl doctor output after redacting sensitive hostnames or addresses.
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Include only relevant kubelet, containerd, or kuiqctl-agent logs. Redact secrets.
+      render: shell
