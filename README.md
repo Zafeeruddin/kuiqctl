@@ -10,6 +10,7 @@ systemd on Debian/Ubuntu hosts.
 git clone https://github.com/Zafeeruddin/kuiqctl.git
 cd kuiqctl
 sudo ./install.sh
+kuiqctl --version
 sudo kuiqctl create
 ```
 
@@ -24,6 +25,9 @@ kubectl get nodes
 `install.sh` installs the CLI at `/usr/local/bin/kuiqctl`, configuration at
 `/etc/kuiqctl/config.json`, and the network watcher as a systemd service. After
 installation, `kuiqctl` can be run from any directory.
+
+Requires a Debian or Ubuntu host using systemd, root access through `sudo`, and
+an internet connection for Kubernetes packages and container images.
 
 ## Recreate or remove the cluster
 

@@ -21,6 +21,9 @@ import time
 import urllib.parse
 import urllib.request
 
+
+__version__ = "0.1.0"
+
 CONFIG_PATH = pathlib.Path("/etc/kuiqctl/config.json")
 ADMIN_CONF = pathlib.Path("/etc/kubernetes/admin.conf")
 KUBEADM_CONFIG = pathlib.Path("/etc/kubernetes/kuiqctl-kubeadm.yaml")
@@ -811,6 +814,7 @@ def init_config(path: pathlib.Path) -> None:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="kuiqctl", description=__doc__)
+    root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     root.add_argument("--config", type=pathlib.Path, default=CONFIG_PATH)
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("create", help="create and start a kubeadm cluster")
