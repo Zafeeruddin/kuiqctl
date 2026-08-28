@@ -1,6 +1,6 @@
 # quick-prod-k8s
 
-`qpk` creates and manages a persistent, single-node **kubeadm** Kubernetes cluster
+`kuiqctl` creates and manages a persistent, single-node **kubeadm** Kubernetes cluster
 on a Debian/Ubuntu systemd host. Kubeadm is the only and default backend. The
 cluster uses containerd and Calico, and a small network watcher runs as a
 service, so everything survives logout and reboot. It manages one host-global cluster
@@ -10,29 +10,55 @@ several isolated clusters on the same machine.
 ## Install and create
 
 ```bash
+# On a new machine:
+git clone <repository-url> quick-prod-k8s
+cd quick-prod-k8s
 sudo ./install.sh
-sudo qpk create
-sudo qpk kubeconfig --output "$HOME/.kube/quick-prod.yaml"
+command -v kuiqctl
+sudo kuiqctl create
+sudo kuiqctl kubeconfig --output "$HOME/.kube/quick-prod.yaml"
 export KUBECONFIG="$HOME/.kube/quick-prod.yaml"
 kubectl get nodes
 ```
 
+`install.sh` places `kuiqctl` in `/usr/local/bin`, its public configuration in
+`/etc/kuiqctl/config.json`, and its watcher in systemd. After that, commands can
+be run from any directory. Lifecycle and kubeconfig commands require `sudo`;
+running one without it returns a direct permission message.
+
 Creation installs kubeadm, kubelet, kubectl, containerd, Calico, and Avahi from
 their current configured repositories. The default configuration permits API access through UFW from
 `192.168.0.0/24` (office) and `192.168.1.0/24` (home). Edit
-`/etc/quick-prod-k8s/config.json` before creation to change those networks,
+`/etc/kuiqctl/config.json` before creation to change those networks,
 cluster virtual networks, Kubernetes minor, name, or endpoint.
+
+If Docker already installed `containerd.io`, kuiqctl reuses its `containerd`
+binary. It does not request Ubuntu's conflicting `containerd` package.
+
+## Where the workflow is implemented
+
+The workflow is Python in the repository's `kuiqctl` executable; it does not
+depend on Ansible. The main functions are:
+
+- `prepare_host()` — packages, containerd, kernel modules, sysctl, swap and mDNS.
+- `write_kubeadm_config()` — generates the kubeadm v1beta4 configuration.
+- `create()` — validates, runs `kubeadm init`, installs Calico and waits for Ready.
+- `reset_cluster()` — runs `kubeadm reset` and removes kuiqctl-owned CNI state.
+- `recreate()` — validates/prepares dependencies before destructive reset, then creates.
+
+`install.sh` is intentionally small: it only installs the executable,
+configuration, and systemd unit.
 
 ## Lifecycle commands
 
 ```bash
-sudo qpk status
-sudo qpk recreate --yes
-sudo qpk remove --yes
+sudo kuiqctl status
+sudo kuiqctl recreate --yes
+sudo kuiqctl remove --yes
 ```
 
 `recreate` and `remove` permanently delete workloads, Kubernetes objects, and
-the local kubeadm/etcd state. They preserve the qpk configuration. The explicit
+the local kubeadm/etcd state. They preserve the kuiqctl configuration. The explicit
 `--yes` flag prevents accidental resets.
 
 ## Moving between networks
@@ -41,7 +67,7 @@ By default, the exported kubeconfig uses `<hostname>.local`, and creation
 installs/enables Avahi. mDNS resolves that stable name to the host's current
 address on either LAN. Internally, kubeadm, kubelet, and local etcd use the
 host-only `stable_node_ip` (`10.255.255.1/32` by default), which is kept on the
-loopback interface by `quick-prod-k8s-agent.service`. The API certificate
+loopback interface by `kuiqctl-agent.service`. The API certificate
 contains the roaming hostname and stable internal address. Consequently, a LAN
 change does not leave etcd or static control-plane manifests bound to an old
 DHCP address.
@@ -59,16 +85,16 @@ they overlap any LAN, VPN, or routed network you use.
 
 ## Operational notes
 
-- `qpk create` refuses an existing kubeadm cluster instead of guessing.
+- `kuiqctl create` refuses an existing kubeadm cluster instead of guessing.
 - The default Kubernetes minor is `1.37`; packages are pinned with `apt-mark`
   after installation. Change `kubernetes_minor` before creation when needed.
 - Calico is pinned to the configured manifest version (`v3.32.1` by default).
-- Swap is disabled at runtime when creating the cluster and by the qpk watcher
+- Swap is disabled at runtime when creating the cluster and by the kuiqctl watcher
   before kubelet on boot; `/etc/fstab` is not modified.
 - The generated admin kubeconfig is mode `0600`; treat it as a root-equivalent
   credential.
 - Inspect the watcher with
-  `journalctl -u quick-prod-k8s-agent.service -f`.
+  `journalctl -u kuiqctl-agent.service -f`.
 - This is a quick single-host cluster, not high availability. The stable
   host-only node address is intended for a single node; adding remote workers
   requires a routed stable control-plane design.

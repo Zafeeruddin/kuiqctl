@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quick, persistent single-node kubeadm cluster lifecycle manager."""
+"""Simple, persistent single-node kubeadm cluster lifecycle manager."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ import tempfile
 import time
 import urllib.request
 
-CONFIG_PATH = pathlib.Path("/etc/quick-prod-k8s/config.json")
+CONFIG_PATH = pathlib.Path("/etc/kuiqctl/config.json")
 ADMIN_CONF = pathlib.Path("/etc/kubernetes/admin.conf")
-KUBEADM_CONFIG = pathlib.Path("/etc/kubernetes/qpk-kubeadm.yaml")
-LOCK_PATH = pathlib.Path("/run/lock/quick-prod-k8s.lock")
-IP_STATE_PATH = pathlib.Path("/run/quick-prod-k8s/primary-ip")
+KUBEADM_CONFIG = pathlib.Path("/etc/kubernetes/kuiqctl-kubeadm.yaml")
+LOCK_PATH = pathlib.Path("/run/lock/kuiqctl.lock")
+IP_STATE_PATH = pathlib.Path("/run/kuiqctl/primary-ip")
 CRI_SOCKET = "unix:///run/containerd/containerd.sock"
 KUBERNETES_KEY_URL = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/Release.key"
 KUBERNETES_REPO = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/"
@@ -43,7 +43,7 @@ def defaults() -> dict:
     }
 
 
-class QPKError(RuntimeError):
+class KuiqctlError(RuntimeError):
     pass
 
 
@@ -60,7 +60,7 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = False, env=None):
 
 def require_root() -> None:
     if os.geteuid() != 0:
-        raise QPKError("this command changes host services; run it with sudo")
+        raise KuiqctlError("this command changes host services; run it with sudo")
 
 
 def load_config(path: pathlib.Path) -> dict:
@@ -69,12 +69,12 @@ def load_config(path: pathlib.Path) -> dict:
         try:
             supplied = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            raise QPKError(f"cannot read configuration {path}: {exc}") from exc
+            raise KuiqctlError(f"cannot read configuration {path}: {exc}") from exc
         if not isinstance(supplied, dict):
-            raise QPKError("configuration root must be a JSON object")
+            raise KuiqctlError("configuration root must be a JSON object")
         unknown = sorted(set(supplied) - set(cfg))
         if unknown:
-            raise QPKError(f"unknown configuration keys: {', '.join(unknown)}")
+            raise KuiqctlError(f"unknown configuration keys: {', '.join(unknown)}")
         cfg.update(supplied)
     if not cfg["endpoint"]:
         cfg["endpoint"] = f"{socket.gethostname().split('.')[0]}.local"
@@ -99,40 +99,40 @@ def validate_config(cfg: dict) -> None:
     if not isinstance(cluster_name, str) or not re.fullmatch(
         r"[a-z0-9](?:[-a-z0-9.]{0,61}[a-z0-9])?", cluster_name
     ):
-        raise QPKError("cluster_name must be a lowercase Kubernetes label (maximum 63 chars)")
+        raise KuiqctlError("cluster_name must be a lowercase Kubernetes label (maximum 63 chars)")
     if not valid_dns_or_ipv4(cfg["endpoint"]):
-        raise QPKError("endpoint must be one valid DNS name or IPv4 address")
+        raise KuiqctlError("endpoint must be one valid DNS name or IPv4 address")
     if not isinstance(cfg["kubernetes_minor"], str) or not re.fullmatch(
         r"1\.(?:3[1-9]|[4-9][0-9])", cfg["kubernetes_minor"]
     ):
-        raise QPKError("kubernetes_minor must be 1.31 or newer, for example 1.37")
+        raise KuiqctlError("kubernetes_minor must be 1.31 or newer, for example 1.37")
     if not isinstance(cfg["calico_version"], str) or not re.fullmatch(
         r"v[0-9]+\.[0-9]+\.[0-9]+", cfg["calico_version"]
     ):
-        raise QPKError("calico_version must look like v3.32.1")
+        raise KuiqctlError("calico_version must look like v3.32.1")
     if not isinstance(cfg["allowed_client_cidrs"], list):
-        raise QPKError("allowed_client_cidrs must be a JSON list")
+        raise KuiqctlError("allowed_client_cidrs must be a JSON list")
     try:
         pod = ipaddress.ip_network(cfg["pod_cidr"])
         service = ipaddress.ip_network(cfg["service_cidr"])
         stable = ipaddress.ip_network(f"{cfg['stable_node_ip']}/32")
         clients = [ipaddress.ip_network(item) for item in cfg["allowed_client_cidrs"]]
     except (ValueError, TypeError) as exc:
-        raise QPKError(f"invalid IPv4/CIDR configuration: {exc}") from exc
+        raise KuiqctlError(f"invalid IPv4/CIDR configuration: {exc}") from exc
     networks = [("pod_cidr", pod), ("service_cidr", service), ("stable_node_ip", stable)] + [
         (f"allowed_client_cidrs[{i}]", item) for i, item in enumerate(clients)
     ]
     if any(network.version != 4 for _, network in networks):
-        raise QPKError("only IPv4 networks are currently supported")
+        raise KuiqctlError("only IPv4 networks are currently supported")
     if not ipaddress.ip_address(cfg["stable_node_ip"]).is_private:
-        raise QPKError("stable_node_ip must be an unused private IPv4 address")
+        raise KuiqctlError("stable_node_ip must be an unused private IPv4 address")
     for index, (left_name, left) in enumerate(networks):
         for right_name, right in networks[index + 1 :]:
             if left.overlaps(right):
-                raise QPKError(f"{left_name} {left} overlaps {right_name} {right}")
+                raise KuiqctlError(f"{left_name} {left} overlaps {right_name} {right}")
     poll = cfg["network_poll_seconds"]
     if isinstance(poll, bool) or not isinstance(poll, int) or poll < 5:
-        raise QPKError("network_poll_seconds must be an integer of at least 5")
+        raise KuiqctlError("network_poll_seconds must be an integer of at least 5")
 
 
 @contextlib.contextmanager
@@ -142,7 +142,7 @@ def lifecycle_lock():
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise QPKError("another cluster lifecycle operation is already running") from exc
+            raise KuiqctlError("another cluster lifecycle operation is already running") from exc
         yield
 
 
@@ -151,9 +151,16 @@ def service_active(name: str) -> bool:
     return result.returncode == 0
 
 
+def path_exists(path: pathlib.Path) -> bool:
+    try:
+        return path.exists()
+    except PermissionError:
+        return False
+
+
 def cluster_present() -> bool:
     return any(
-        path.exists()
+        path_exists(path)
         for path in [
             ADMIN_CONF,
             pathlib.Path("/etc/kubernetes/manifests/kube-apiserver.yaml"),
@@ -164,16 +171,16 @@ def cluster_present() -> bool:
 
 
 def legacy_k3s_present() -> bool:
-    return pathlib.Path("/etc/rancher/k3s/k3s.yaml").exists()
+    return path_exists(pathlib.Path("/etc/rancher/k3s/k3s.yaml"))
 
 
 def download(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "quick-prod-k8s/2"})
+    request = urllib.request.Request(url, headers={"User-Agent": "kuiqctl/1"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return response.read()
     except OSError as exc:
-        raise QPKError(f"could not download {url}: {exc}") from exc
+        raise KuiqctlError(f"could not download {url}: {exc}") from exc
 
 
 def install_repository(cfg: dict) -> None:
@@ -197,8 +204,8 @@ def configure_containerd() -> None:
     generated = run(["containerd", "config", "default"], capture=True).stdout
     generated = re.sub(r"SystemdCgroup\s*=\s*false", "SystemdCgroup = true", generated)
     if "SystemdCgroup = true" not in generated:
-        raise QPKError("could not enable containerd's systemd cgroup driver")
-    backup = config_path.with_name("config.toml.before-quick-prod-k8s")
+        raise KuiqctlError("could not enable containerd's systemd cgroup driver")
+    backup = config_path.with_name("config.toml.before-kuiqctl")
     if config_path.exists() and not backup.exists():
         shutil.copy2(config_path, backup)
     temporary = config_path.with_suffix(".tmp")
@@ -215,9 +222,9 @@ def ensure_endpoint(cfg: dict) -> None:
         return
     expected = f"{socket.gethostname().split('.')[0]}.local"
     if endpoint.lower() != expected.lower():
-        raise QPKError(f"mDNS endpoint must match this host ({expected}); use external DNS for aliases")
+        raise KuiqctlError(f"mDNS endpoint must match this host ({expected}); use external DNS for aliases")
     if not shutil.which("avahi-daemon"):
-        raise QPKError("avahi-daemon is required for a .local roaming endpoint")
+        raise KuiqctlError("avahi-daemon is required for a .local roaming endpoint")
     run(["systemctl", "enable", "--now", "avahi-daemon"])
 
 
@@ -233,19 +240,28 @@ def package_stack_ready(cfg: dict) -> bool:
     return version.returncode == 0 and version.stdout.startswith(f"v{cfg['kubernetes_minor']}.")
 
 
+def prerequisite_packages() -> list[str]:
+    packages = ["ca-certificates", "curl", "gpg", "avahi-daemon"]
+    # Docker's containerd.io provides the same binary and conflicts with
+    # Ubuntu's containerd package. Reuse whichever containerd is installed.
+    if not shutil.which("containerd"):
+        packages.append("containerd")
+    return packages
+
+
 def prepare_host(cfg: dict) -> None:
     if not shutil.which("apt-get"):
-        raise QPKError("this release supports Debian/Ubuntu hosts with apt-get")
+        raise KuiqctlError("this release supports Debian/Ubuntu hosts with apt-get")
     if not package_stack_ready(cfg):
         run(["apt-get", "update"])
-        run(["apt-get", "install", "-y", "ca-certificates", "curl", "gpg", "containerd", "avahi-daemon"])
+        run(["apt-get", "install", "-y", *prerequisite_packages()])
         install_repository(cfg)
         run(["apt-get", "update"])
         run(["apt-mark", "unhold", "kubelet", "kubeadm", "kubectl"], check=False)
         run(["apt-get", "install", "-y", "kubelet", "kubeadm", "kubectl"])
         run(["apt-mark", "hold", "kubelet", "kubeadm", "kubectl"])
-    pathlib.Path("/etc/modules-load.d/quick-prod-k8s.conf").write_text("overlay\nbr_netfilter\n")
-    pathlib.Path("/etc/sysctl.d/99-quick-prod-k8s.conf").write_text(
+    pathlib.Path("/etc/modules-load.d/kuiqctl.conf").write_text("overlay\nbr_netfilter\n")
+    pathlib.Path("/etc/sysctl.d/99-kuiqctl.conf").write_text(
         "net.bridge.bridge-nf-call-iptables = 1\n"
         "net.bridge.bridge-nf-call-ip6tables = 1\n"
         "net.ipv4.ip_forward = 1\n"
@@ -267,7 +283,7 @@ def configure_firewall(cfg: dict) -> None:
     if "Status: active" not in status.stdout:
         return
     for cidr in cfg["allowed_client_cidrs"]:
-        run(["ufw", "allow", "from", cidr, "to", "any", "port", "6443", "proto", "tcp", "comment", "quick-prod-k8s API"])
+        run(["ufw", "allow", "from", cidr, "to", "any", "port", "6443", "proto", "tcp", "comment", "kuiqctl API"])
 
 
 def yaml_string(value: str) -> str:
@@ -277,7 +293,7 @@ def yaml_string(value: str) -> str:
 def write_kubeadm_config(cfg: dict) -> None:
     KUBEADM_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     node_name = socket.gethostname().split(".")[0].lower()
-    content = f"""# Managed by quick-prod-k8s. Edit {CONFIG_PATH} instead.
+    content = f"""# Managed by kuiqctl. Edit {CONFIG_PATH} instead.
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
@@ -339,26 +355,26 @@ def wait_ready(timeout: int = 300) -> None:
         if api.returncode == 0 and api.stdout.strip() == "ok" and nodes.returncode == 0 and nodes.stdout.strip() == "True":
             return
         time.sleep(5)
-    raise QPKError("Kubernetes API and node did not become ready within 300 seconds")
+    raise KuiqctlError("Kubernetes API and node did not become ready within 300 seconds")
 
 
 def enable_agent() -> None:
-    unit = pathlib.Path("/etc/systemd/system/quick-prod-k8s-agent.service")
+    unit = pathlib.Path("/etc/systemd/system/kuiqctl-agent.service")
     if not unit.exists():
-        raise QPKError("agent unit is missing; run the repository install.sh first")
+        raise KuiqctlError("agent unit is missing; run the repository install.sh first")
     run(["systemctl", "daemon-reload"])
-    run(["systemctl", "enable", "--now", "quick-prod-k8s-agent.service"])
+    run(["systemctl", "enable", "--now", "kuiqctl-agent.service"])
 
 
 def create(cfg: dict) -> None:
     require_root()
     with lifecycle_lock():
         if legacy_k3s_present():
-            raise QPKError("K3s is installed; run 'qpk recreate --yes' to replace it with kubeadm")
+            raise KuiqctlError("K3s is installed; run 'kuiqctl recreate --yes' to replace it with kubeadm")
         if cluster_present():
-            raise QPKError("a kubeadm cluster already exists; use 'qpk recreate --yes'")
+            raise KuiqctlError("a kubeadm cluster already exists; use 'kuiqctl recreate --yes'")
         if not pathlib.Path("/run/systemd/system").exists():
-            raise QPKError("systemd is required")
+            raise KuiqctlError("systemd is required")
         prepare_host(cfg)
         configure_firewall(cfg)
         write_kubeadm_config(cfg)
@@ -369,15 +385,15 @@ def create(cfg: dict) -> None:
         wait_ready()
         enable_agent()
         print(f"Cluster is ready at https://{cfg['endpoint']}:6443")
-        print("Export its kubeconfig with: sudo qpk kubeconfig --output ~/.kube/quick-prod.yaml")
+        print("Export its kubeconfig with: sudo kuiqctl kubeconfig --output ~/.kube/quick-prod.yaml")
 
 
 def reset_cluster(cfg: dict, *, remove_alias: bool) -> None:
-    run(["systemctl", "disable", "--now", "quick-prod-k8s-agent.service"], check=False)
+    run(["systemctl", "disable", "--now", "kuiqctl-agent.service"], check=False)
     if legacy_k3s_present():
         legacy_uninstaller = pathlib.Path("/usr/local/bin/k3s-uninstall.sh")
         if not legacy_uninstaller.exists():
-            raise QPKError("legacy K3s state exists but k3s-uninstall.sh is missing")
+            raise KuiqctlError("legacy K3s state exists but k3s-uninstall.sh is missing")
         run([str(legacy_uninstaller)])
     if shutil.which("kubeadm") and cluster_present():
         run(["kubeadm", "reset", "--force", "--cri-socket", CRI_SOCKET])
@@ -393,16 +409,19 @@ def reset_cluster(cfg: dict, *, remove_alias: bool) -> None:
 def remove(cfg: dict, yes: bool) -> None:
     require_root()
     if not yes:
-        raise QPKError("remove destroys workloads and cluster data; repeat with --yes")
+        raise KuiqctlError("remove destroys workloads and cluster data; repeat with --yes")
     with lifecycle_lock():
         reset_cluster(cfg, remove_alias=True)
-        print("Cluster and kubeadm state removed; packages and qpk configuration were preserved.")
+        print("Cluster and kubeadm state removed; packages and kuiqctl configuration were preserved.")
 
 
 def recreate(cfg: dict, yes: bool) -> None:
     require_root()
     if not yes:
-        raise QPKError("recreate destroys workloads and cluster data; repeat with --yes")
+        raise KuiqctlError("recreate destroys workloads and cluster data; repeat with --yes")
+    # Resolve repositories, packages and runtime configuration before deleting
+    # a working cluster. A dependency/download failure must not erase it first.
+    prepare_host(cfg)
     with lifecycle_lock():
         reset_cluster(cfg, remove_alias=False)
     create(cfg)
@@ -421,7 +440,7 @@ def rewrite_kubeconfig(text: str, endpoint: str, cluster_name: str) -> str:
 def kubeconfig(cfg: dict, output: str | None) -> None:
     require_root()
     if not ADMIN_CONF.exists():
-        raise QPKError("cluster kubeconfig does not exist; create the cluster first")
+        raise KuiqctlError("cluster kubeconfig does not exist; create the cluster first")
     content = rewrite_kubeconfig(ADMIN_CONF.read_text(), cfg["endpoint"], cfg["cluster_name"])
     if not output or output == "-":
         sys.stdout.write(content)
@@ -455,7 +474,7 @@ def primary_ip() -> str:
 
 def status(cfg: dict) -> int:
     kubelet = service_active("kubelet")
-    watcher = service_active("quick-prod-k8s-agent.service")
+    watcher = service_active("kuiqctl-agent.service")
     legacy = legacy_k3s_present()
     print(f"cluster:  {cfg['cluster_name']}")
     print("backend:  kubeadm")
@@ -465,8 +484,8 @@ def status(cfg: dict) -> int:
     print(f"host-ip:  {primary_ip() or 'unavailable'}")
     print(f"node-ip:  {cfg['stable_node_ip']} (host-only, stable)")
     if legacy:
-        print("legacy:   K3s state detected; use qpk recreate --yes to migrate")
-    if ADMIN_CONF.exists() and os.geteuid() == 0:
+        print("legacy:   K3s state detected; use kuiqctl recreate --yes to migrate")
+    if path_exists(ADMIN_CONF) and os.geteuid() == 0:
         return kubectl(["get", "nodes", "-o", "wide"], check=False).returncode
     return 1 if cluster_present() or legacy else 0
 
@@ -491,15 +510,15 @@ def agent(cfg: dict, once: bool) -> None:
 def init_config(path: pathlib.Path) -> None:
     require_root()
     if path.exists():
-        raise QPKError(f"refusing to overwrite existing {path}")
+        raise KuiqctlError(f"refusing to overwrite existing {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(defaults(), indent=2) + "\n")
-    os.chmod(path, 0o600)
+    os.chmod(path, 0o644)
     print(f"Created {path}; endpoint defaults to this-hostname.local when left empty.")
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="qpk", description=__doc__)
+    root = argparse.ArgumentParser(prog="kuiqctl", description=__doc__)
     root.add_argument("--config", type=pathlib.Path, default=CONFIG_PATH)
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("create", help="create and start a kubeadm cluster")
@@ -519,6 +538,8 @@ def parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command in {"create", "recreate", "remove", "kubeconfig", "agent", "init"}:
+            require_root()
         if args.command == "init":
             init_config(args.config)
             return 0
@@ -536,11 +557,11 @@ def main(argv=None) -> int:
         elif args.command == "agent":
             agent(cfg, args.once)
         return 0
-    except QPKError as exc:
-        print(f"qpk: {exc}", file=sys.stderr)
+    except KuiqctlError as exc:
+        print(f"kuiqctl: {exc}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as exc:
-        print(f"qpk: command failed ({exc.returncode}): {' '.join(exc.cmd)}", file=sys.stderr)
+        print(f"kuiqctl: command failed ({exc.returncode}): {' '.join(exc.cmd)}", file=sys.stderr)
         return exc.returncode or 1
 
 
