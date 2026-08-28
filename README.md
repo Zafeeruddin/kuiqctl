@@ -31,12 +31,12 @@ between LANs or receives a different DHCP address.
 
 <p align="center">
   <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4">
-    <img alt="Watch kuiqctl keep a kubeadm cluster Ready while moving from home Wi-Fi to an office LAN" src="assets/kuiqctl-social-preview.png" width="760">
+    <img alt="kuiqctl keeps a kubeadm cluster Ready while moving from home Wi-Fi to an office LAN" src="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.gif" width="960">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4"><strong>▶ Watch the 38-second terminal demo</strong></a>
+  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4"><strong>▶ Open the full-quality 38-second demo</strong></a>
 </p>
 
 ## Quick start
