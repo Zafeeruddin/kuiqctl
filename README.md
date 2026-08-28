@@ -27,6 +27,18 @@ between LANs or receives a different DHCP address.
 > kuiqctl is an early-stage `v0.1` project. It is intended for a single Linux
 > host, not a high-availability or multi-node production control plane.
 
+## See it survive a network change
+
+<p align="center">
+  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4">
+    <img alt="Watch kuiqctl keep a kubeadm cluster Ready while moving from home Wi-Fi to an office LAN" src="assets/kuiqctl-social-preview.png" width="760">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Zafeeruddin/kuiqctl/releases/download/v0.1.0/kuiqctl-demo.mp4"><strong>▶ Watch the 38-second terminal demo</strong></a>
+</p>
+
 ## Quick start
 
 ```bash
