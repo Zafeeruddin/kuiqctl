@@ -1,5 +1,5 @@
 {
-  "cluster_name": "quick-prod",
+  "cluster_name": "kuiqctl",
   "endpoint": "",
   "kubernetes_minor": "1.37",
   "calico_version": "v3.32.1",

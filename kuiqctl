@@ -36,7 +36,7 @@ KUBERNETES_REPO = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/"
 
 def defaults() -> dict:
     return {
-        "cluster_name": "quick-prod",
+        "cluster_name": "kuiqctl",
         "endpoint": "",
         "kubernetes_minor": "1.37",
         "calico_version": "v3.32.1",
@@ -646,7 +646,7 @@ def initialize_cluster(cfg: dict) -> None:
     wait_ready()
     enable_agent()
     print(f"Cluster is ready at https://{cfg['endpoint']}:6443")
-    print("Export its kubeconfig with: sudo kuiqctl kubeconfig --output ~/.kube/quick-prod.yaml")
+    print("Export its kubeconfig with: sudo kuiqctl kubeconfig --output ~/.kube/kuiqctl.yaml")
 
 
 def create(cfg: dict) -> None:

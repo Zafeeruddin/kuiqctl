@@ -1,137 +1,214 @@
-# quick-prod-k8s
+# kuiqctl
 
-`kuiqctl` creates and manages a persistent, single-node **kubeadm** Kubernetes cluster
-on a Debian/Ubuntu systemd host. Kubeadm is the only and default backend. The
-cluster uses containerd and Calico, and a small network watcher runs as a
-service, so everything survives logout and reboot. It manages one host-global cluster
-at a time; `cluster_name` controls its kubeconfig identity rather than creating
-several isolated clusters on the same machine.
+Create, recreate, inspect, and remove a persistent single-node Kubernetes
+cluster with a few commands. `kuiqctl` uses kubeadm, containerd, Calico, and
+systemd on Debian/Ubuntu hosts.
 
-## Install and create
+## Quick start
 
 ```bash
-# On a new machine:
-git clone <repository-url> quick-prod-k8s
-cd quick-prod-k8s
+git clone https://github.com/Zafeeruddin/kuiqctl.git
+cd kuiqctl
 sudo ./install.sh
-command -v kuiqctl
-sudo kuiqctl preflight
 sudo kuiqctl create
-sudo kuiqctl kubeconfig --output "$HOME/.kube/quick-prod.yaml"
-export KUBECONFIG="$HOME/.kube/quick-prod.yaml"
+```
+
+Export the administrator kubeconfig and verify the cluster:
+
+```bash
+sudo kuiqctl kubeconfig --output "$HOME/.kube/kuiqctl.yaml"
+export KUBECONFIG="$HOME/.kube/kuiqctl.yaml"
 kubectl get nodes
 ```
 
-`install.sh` places `kuiqctl` in `/usr/local/bin`, its public configuration in
-`/etc/kuiqctl/config.json`, and its watcher in systemd. After that, commands can
-be run from any directory. Lifecycle and kubeconfig commands require `sudo`;
-running one without it returns a direct permission message.
+`install.sh` installs the CLI at `/usr/local/bin/kuiqctl`, configuration at
+`/etc/kuiqctl/config.json`, and the network watcher as a systemd service. After
+installation, `kuiqctl` can be run from any directory.
 
-Creation installs kubeadm, kubelet, kubectl, containerd, Calico, and Avahi from
-their current configured repositories. The default configuration permits API access through UFW from
-`192.168.0.0/24` (office) and `192.168.1.0/24` (home). Edit
-`/etc/kuiqctl/config.json` before creation to change those networks,
-cluster virtual networks, Kubernetes minor, name, or endpoint.
+## Recreate or remove the cluster
 
-Before `kubeadm init`—and before `recreate` resets an existing cluster—kuiqctl:
+Recreate the cluster from scratch:
 
-1. Uses the exact installed kubeadm patch version instead of a network-resolved
-   `stable-X.Y` label.
-2. Verifies a default IPv4 route and DNS for the configured image registry and
-   GitHub manifest host.
-3. Downloads and validates the pinned Calico manifest into `/var/cache/kuiqctl`.
-4. Pre-pulls every Kubernetes and Calico image into containerd.
+```bash
+sudo kuiqctl recreate --yes
+```
 
-Any DNS, route, proxy, authentication, registry, or download failure stops
-before destructive reset and reports the failed stage. For a corporate image
-mirror, set `image_repository` in `/etc/kuiqctl/config.json`; configure normal
-containerd registry mirrors/authentication when Calico images must also be
-mirrored.
+Remove the cluster while preserving the installed packages and kuiqctl
+configuration:
 
-If Docker already installed `containerd.io`, kuiqctl reuses its `containerd`
-binary. It does not request Ubuntu's conflicting `containerd` package.
+```bash
+sudo kuiqctl remove --yes
+```
 
-## Where the workflow is implemented
+Both commands permanently delete workloads, Kubernetes objects, and local
+etcd data. The required `--yes` flag prevents accidental resets.
 
-The workflow is Python in the repository's `kuiqctl` executable; it does not
-depend on Ansible. The main functions are:
-
-- `prepare_host()` — packages, containerd, kernel modules, sysctl, swap and mDNS.
-- `write_kubeadm_config()` — generates the kubeadm v1beta4 configuration.
-- `create()` — validates, runs `kubeadm init`, installs Calico and waits for Ready.
-- `reset_cluster()` — runs `kubeadm reset` and removes kuiqctl-owned CNI state.
-- `recreate()` — validates/prepares dependencies before destructive reset, then creates.
-
-`install.sh` is intentionally small: it only installs the executable,
-configuration, and systemd unit.
-
-## Lifecycle commands
+Other useful commands:
 
 ```bash
 sudo kuiqctl preflight
 sudo kuiqctl status
-sudo kuiqctl recreate --yes
-sudo kuiqctl remove --yes
+journalctl -u kuiqctl-agent.service -f
 ```
 
-`create` performs the same clean-host preflight automatically. If kubeadm/K3s
-state or ports 6443, 10257, 10259, 2379, or 2380 are present, it stops with the
-exact conflict and tells the operator to use `recreate`. It does not partially
-initialize over stale control-plane processes.
+## Architecture
 
-`recreate` stops kubelet and resets every detected CRI socket, including CRI-O
-from an older cluster and the containerd default. It waits for the old
-control-plane ports to be released before starting `kubeadm init`; if an
-unrelated process still owns one, it reports the ports and an `ss` diagnostic
-command.
+### Cluster lifecycle
 
-For network failures, start with:
+```mermaid
+flowchart TD
+    User[Operator] --> CLI[kuiqctl]
+    CLI --> Lock[Host lifecycle lock]
+    Lock --> Host[Prepare host]
+    Host --> Packages[kubeadm + kubelet + kubectl]
+    Host --> Runtime[containerd + systemd cgroups]
+    Host --> Kernel[Kernel modules + sysctl + swap]
+
+    Packages --> Preflight[Artifact preflight]
+    Runtime --> Preflight
+    Preflight --> DNS[Check route and DNS]
+    Preflight --> Images[Pre-pull Kubernetes and Calico images]
+    Preflight --> Manifest[Cache pinned Calico manifest]
+
+    DNS --> Init[kubeadm init]
+    Images --> Init
+    Manifest --> Init
+    Init --> CNI[Install Calico]
+    CNI --> Ready[Wait for API and Node Ready]
+    Ready --> Agent[kuiqctl systemd watcher]
+```
+
+For `recreate`, host and artifact preparation completes before the old cluster
+is reset. DNS, routing, proxy, registry, authentication, package, or download
+failures therefore stop before destructive reset.
+
+### Roaming network design
+
+```mermaid
+flowchart LR
+    subgraph Clients[Current LAN]
+        Home[Home client\n192.168.1.0/24]
+        Office[Office client\n192.168.0.0/24]
+    end
+
+    Home --> Name[hostname.local:6443]
+    Office --> Name
+    Name -->|mDNS / Avahi| DHCP[Current DHCP address]
+    DHCP --> API[kube-apiserver]
+
+    subgraph Host[Kubernetes host]
+        Stable[Stable loopback identity\n10.255.255.1/32]
+        API --> Stable
+        Stable --> Etcd[local etcd]
+        Stable --> Kubelet[kubelet]
+        Stable --> Calico[Calico node identity]
+        Watcher[kuiqctl-agent] --> Stable
+    end
+```
+
+Remote kubectl clients use the stable `<hostname>.local` TLS name, which mDNS
+maps to the machine's current LAN address. Internally, kubeadm, etcd, kubelet,
+and Calico use the host-only `stable_node_ip`. Moving between LANs therefore
+does not leave control-plane components bound to an old DHCP address.
+
+Some managed, corporate, and guest networks block mDNS or isolate clients. On
+those networks, configure `endpoint` as a routed DNS name, Tailscale MagicDNS
+name, or another stable hostname.
+
+## Configuration
+
+The default configuration is installed at `/etc/kuiqctl/config.json`:
+
+```json
+{
+  "cluster_name": "kuiqctl",
+  "endpoint": "",
+  "kubernetes_minor": "1.37",
+  "calico_version": "v3.32.1",
+  "image_repository": "registry.k8s.io",
+  "pod_cidr": "10.244.0.0/16",
+  "service_cidr": "10.96.0.0/12",
+  "stable_node_ip": "10.255.255.1",
+  "allowed_client_cidrs": [
+    "192.168.0.0/24",
+    "192.168.1.0/24"
+  ],
+  "network_poll_seconds": 15
+}
+```
+
+An empty `endpoint` becomes `<hostname>.local`. Change the configuration before
+creating the first cluster. Pod, Service, stable-node, and allowed-client
+networks are checked for overlaps.
+
+Set `image_repository` when Kubernetes control-plane images must come from a
+corporate mirror. Configure containerd registry mirrors and credentials as
+usual when Calico images must also be mirrored.
+
+## Creation and safety workflow
+
+Before `kubeadm init`, kuiqctl:
+
+1. Acquires a host-visible lock to reject concurrent lifecycle operations.
+2. Rejects existing or partial cluster state during `create`.
+3. Installs matching kubeadm, kubelet, and kubectl packages.
+4. Reuses Docker's `containerd.io` when present instead of installing the
+   conflicting Ubuntu `containerd` package.
+5. Configures containerd, kernel modules, forwarding, and swap.
+6. Uses the exact installed Kubernetes patch version.
+7. Checks the default IPv4 route and required DNS names.
+8. Caches the Calico manifest and pre-pulls all required images.
+9. Validates the generated kubeadm v1beta4 configuration.
+10. Initializes Kubernetes, installs Calico, and waits for readiness.
+
+`create` also checks ports 6443, 10257, 10259, 2379, and 2380. Existing state or
+occupied control-plane ports produce a concise message directing the operator
+to `sudo kuiqctl recreate --yes`.
+
+During `recreate`, kuiqctl stops kubelet, resets every detected CRI socket
+(including older CRI-O installations), removes owned CNI state, and waits for
+old control-plane ports to close before initializing the replacement cluster.
+
+## Troubleshooting
+
+Run the built-in checks first:
+
+```bash
+sudo kuiqctl preflight
+sudo kuiqctl status
+```
+
+For network or registry failures:
 
 ```bash
 ip -4 route
 resolvectl status
 resolvectl query registry.k8s.io
-sudo kuiqctl preflight
 ```
 
-`recreate` and `remove` permanently delete workloads, Kubernetes objects, and
-the local kubeadm/etcd state. They preserve the kuiqctl configuration. The explicit
-`--yes` flag prevents accidental resets.
+For occupied ports or stale control-plane processes:
 
-## Moving between networks
+```bash
+sudo ss -ltnp
+sudo journalctl -u kubelet -u containerd -n 200
+sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -a
+```
 
-By default, the exported kubeconfig uses `<hostname>.local`, and creation
-installs/enables Avahi. mDNS resolves that stable name to the host's current
-address on either LAN. Internally, kubeadm, kubelet, and local etcd use the
-host-only `stable_node_ip` (`10.255.255.1/32` by default), which is kept on the
-loopback interface by `kuiqctl-agent.service`. The API certificate
-contains the roaming hostname and stable internal address. Consequently, a LAN
-change does not leave etcd or static control-plane manifests bound to an old
-DHCP address.
+Artifact failures are reported before cluster reset and classified as DNS,
+routing, timeout, proxy/firewall, authentication, or registry failures.
 
-This works when the kubectl client is on the same multicast-capable LAN. Some
-corporate and guest Wi-Fi networks block mDNS or isolate clients. In that case,
-set `endpoint` to a stable DNS name, Tailscale MagicDNS name, or another routed
-name before creating the cluster. Both networks must also allow TCP 6443 to the
-host. CIDR values cannot be placed in a TLS certificate; an IP SAN represents
-only one IP, which is why the stable name is essential.
+## Implementation
 
-The Pod (`10.244.0.0/16`), Service (`10.96.0.0/12`), stable node IP, and client
-LANs are validated against each other. Change them before initial creation if
-they overlap any LAN, VPN, or routed network you use.
+The orchestration workflow is implemented in the repository's `kuiqctl` Python
+executable and does not depend on Ansible:
 
-## Operational notes
+- `prepare_host()` installs and configures host dependencies.
+- `write_kubeadm_config()` generates kubeadm v1beta4 configuration.
+- `prepare_creation_artifacts()` validates and caches external dependencies.
+- `initialize_cluster()` runs kubeadm, installs Calico, and verifies readiness.
+- `reset_cluster()` removes kubeadm and kuiqctl-owned CNI state.
+- `create()` and `recreate()` enforce the safe lifecycle ordering.
 
-- `kuiqctl create` refuses an existing kubeadm cluster instead of guessing.
-- The default Kubernetes minor is `1.37`; packages are pinned with `apt-mark`
-  after installation. Change `kubernetes_minor` before creation when needed.
-- Calico is pinned to the configured manifest version (`v3.32.1` by default).
-- Swap is disabled at runtime when creating the cluster and by the kuiqctl watcher
-  before kubelet on boot; `/etc/fstab` is not modified.
-- The generated admin kubeconfig is mode `0600`; treat it as a root-equivalent
-  credential.
-- Inspect the watcher with
-  `journalctl -u kuiqctl-agent.service -f`.
-- This is a quick single-host cluster, not high availability. The stable
-  host-only node address is intended for a single node; adding remote workers
-  requires a routed stable control-plane design.
+This is a quick single-host cluster, not a high-availability control plane. A
+host failure stops the cluster, and adding remote worker nodes requires a
+routed stable control-plane design.
