@@ -84,11 +84,18 @@ class ConfigTests(unittest.TestCase):
 
 class KubeconfigTests(unittest.TestCase):
     def test_rewrites_endpoint_and_names(self):
-        original = "server: https://10.255.255.1:6443\nname: kubernetes\ncurrent-context: kubernetes-admin\n"
+        original = (
+            "server: https://10.255.255.1:6443\n"
+            "name: kubernetes\n"
+            "cluster: kubernetes\n"
+            "user: kubernetes-admin\n"
+            "name: kubernetes-admin@kubernetes\n"
+            "current-context: kubernetes-admin@kubernetes\n"
+        )
         result = kuiqctl.rewrite_kubeconfig(original, "node.local", "demo")
         self.assertIn("https://node.local:6443", result)
         self.assertNotIn("kubernetes-admin", result)
-        self.assertEqual(result.count("demo"), 2)
+        self.assertEqual(result.count("demo"), 5)
 
     def test_installs_default_kubeconfig_for_invoking_user(self):
         config = kuiqctl.defaults()
@@ -109,7 +116,8 @@ class KubeconfigTests(unittest.TestCase):
                 destination = kuiqctl.install_default_kubeconfig(config)
             rendered = destination.read_text()
             self.assertEqual(destination, root / ".kube" / "config")
-            self.assertIn("https://node.local:6443", rendered)
+            self.assertIn("https://10.255.255.1:6443", rendered)
+            self.assertNotIn("https://node.local:6443", rendered)
             self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
             self.assertEqual(destination.parent.stat().st_mode & 0o777, 0o700)
 

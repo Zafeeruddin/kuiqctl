@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep the stable loopback API endpoint in the invoking user's local default
+  kubeconfig and fully rename its context, avoiding DNS/proxy interception and
+  collisions with an existing kubeadm context.
 - Detect and terminate verified stale control-plane processes that continue
   holding Kubernetes ports after kubeadm and CRI cleanup.
 - Force-remove CRI containers and pod sandboxes left behind by kubeadm's

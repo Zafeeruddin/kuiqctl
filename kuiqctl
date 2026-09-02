@@ -825,10 +825,12 @@ def recreate(cfg: dict, yes: bool) -> None:
         initialize_cluster(cfg)
 
 
-def rewrite_kubeconfig(text: str, endpoint: str, cluster_name: str) -> str:
-    text = re.sub(r"https://[^:\s]+:6443", f"https://{endpoint}:6443", text, count=1)
+def rewrite_kubeconfig(text: str, endpoint: str | None, cluster_name: str) -> str:
+    if endpoint:
+        text = re.sub(r"https://[^:\s]+:6443", f"https://{endpoint}:6443", text, count=1)
     text = re.sub(
-        r"(?m)^(\s*(?:name|cluster|user|current-context):\s*)kubernetes(?:-admin)?(\s*)$",
+        r"(?m)^(\s*(?:name|cluster|user|current-context):\s*)"
+        r"(?:kubernetes|kubernetes-admin|kubernetes-admin@kubernetes)(\s*)$",
         rf"\g<1>{cluster_name}\g<2>",
         text,
     )
@@ -874,7 +876,9 @@ def install_default_kubeconfig(cfg: dict) -> pathlib.Path:
         raise KuiqctlError("cluster kubeconfig does not exist")
     username, home, uid, gid = invoking_user()
     destination = home / ".kube" / "config"
-    content = rewrite_kubeconfig(ADMIN_CONF.read_text(), cfg["endpoint"], cfg["cluster_name"])
+    # This file is used on the cluster host, where kubeadm's stable loopback
+    # endpoint is always reachable and must not be sent through a DNS proxy.
+    content = rewrite_kubeconfig(ADMIN_CONF.read_text(), None, cfg["cluster_name"])
     if destination.exists():
         source = None
         try:

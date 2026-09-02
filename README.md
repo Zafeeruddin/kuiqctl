@@ -62,7 +62,9 @@ kubectl get nodes
 After creation, kuiqctl installs the administrator kubeconfig at
 `~/.kube/config` for the user who invoked `sudo`. If that file already exists,
 the new cluster is merged into it so other contexts are preserved. The
-`kuiqctl kubeconfig` command remains available for exporting to another path.
+local default uses the stable loopback endpoint so host-side `kubectl` does not
+depend on DNS or proxy bypass settings. The `kuiqctl kubeconfig` command remains
+available for exporting a roaming-endpoint configuration to another path.
 
 `install.sh` installs the CLI at `/usr/local/bin/kuiqctl`, configuration at
 `/etc/kuiqctl/config.json`, and the network watcher as a systemd service. After
