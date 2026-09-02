@@ -35,6 +35,7 @@ CRI_SOCKET = "unix:///run/containerd/containerd.sock"
 CONTROL_PLANE_PORTS = (6443, 10257, 10259, 2379, 2380)
 KUBERNETES_KEY_URL = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/Release.key"
 KUBERNETES_REPO = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/"
+KUBERNETES_PACKAGES = ("kubelet", "kubeadm", "kubectl", "cri-tools")
 
 
 def defaults() -> dict:
@@ -64,15 +65,18 @@ def run(
     env=None,
     timeout: int | None = None,
 ):
-    return subprocess.run(
-        cmd,
-        check=check,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-        env=env,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            check=check,
+            text=True,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            env=env,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise KuiqctlError(f"required command not found: {cmd[0]}") from exc
 
 
 def require_root() -> None:
@@ -322,7 +326,7 @@ def ensure_stable_ip(cfg: dict) -> None:
 
 
 def package_stack_ready(cfg: dict) -> bool:
-    required = ["kubeadm", "kubelet", "kubectl", "containerd", "avahi-daemon"]
+    required = ["kubeadm", "kubelet", "kubectl", "crictl", "containerd", "avahi-daemon"]
     if any(not shutil.which(binary) for binary in required):
         return False
     version = run(["kubeadm", "version", "-o", "short"], check=False, capture=True)
@@ -354,9 +358,9 @@ def prepare_host(cfg: dict) -> None:
         run(["apt-get", "install", "-y", *prerequisite_packages()])
         install_repository(cfg)
         run(["apt-get", "update"])
-        run(["apt-mark", "unhold", "kubelet", "kubeadm", "kubectl"], check=False)
-        run(["apt-get", "install", "-y", "kubelet", "kubeadm", "kubectl"])
-        run(["apt-mark", "hold", "kubelet", "kubeadm", "kubectl"])
+        run(["apt-mark", "unhold", *KUBERNETES_PACKAGES], check=False)
+        run(["apt-get", "install", "-y", *KUBERNETES_PACKAGES])
+        run(["apt-mark", "hold", *KUBERNETES_PACKAGES])
     pathlib.Path("/etc/modules-load.d/kuiqctl.conf").write_text("overlay\nbr_netfilter\n")
     sysctl_path = pathlib.Path("/etc/sysctl.d/99-kuiqctl.conf")
     sysctl_path.write_text(
@@ -1122,12 +1126,17 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="kuiqctl", description=__doc__)
     root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     root.add_argument("--config", type=pathlib.Path, default=CONFIG_PATH)
+    root.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm a destructive recreate or remove operation",
+    )
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("create", help="create and start a kubeadm cluster")
     destructive = commands.add_parser("recreate", help="destroy and create the cluster")
-    destructive.add_argument("--yes", action="store_true")
+    destructive.add_argument("--yes", action="store_true", default=argparse.SUPPRESS)
     delete = commands.add_parser("remove", help="destroy and remove the cluster")
-    delete.add_argument("--yes", action="store_true")
+    delete.add_argument("--yes", action="store_true", default=argparse.SUPPRESS)
     commands.add_parser("status", help="show cluster and network status")
     commands.add_parser("preflight", help="verify that create can start on this host")
     commands.add_parser("doctor", help="diagnose an existing cluster")
@@ -1140,7 +1149,10 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    args = parser().parse_args(argv)
+    argument_parser = parser()
+    args = argument_parser.parse_args(argv)
+    if args.yes and args.command not in {"recreate", "remove"}:
+        argument_parser.error("--yes is only valid with recreate or remove")
     try:
         if args.command in {"create", "recreate", "remove", "kubeconfig", "agent", "init", "preflight", "doctor"}:
             require_root()

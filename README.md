@@ -250,7 +250,7 @@ During `create` or `recreate`, kuiqctl makes these host-level changes:
 
 - Adds the Kubernetes apt signing key and minor-version repository under
   `/etc/apt/keyrings` and `/etc/apt/sources.list.d`, then installs and holds
-  `kubeadm`, `kubelet`, and `kubectl` at matching versions.
+  `kubeadm`, `kubelet`, `kubectl`, and `cri-tools` at matching versions.
 - Reuses an existing containerd, including Docker's `containerd.io`, when one
   is installed. Otherwise it installs Debian/Ubuntu's `containerd` package.
   Before generating a containerd config it saves the existing config once as
@@ -289,7 +289,7 @@ Before `kubeadm init`, kuiqctl:
 
 1. Acquires a host-visible lock to reject concurrent lifecycle operations.
 2. Rejects existing or partial cluster state during `create`.
-3. Installs matching kubeadm, kubelet, and kubectl packages.
+3. Installs matching kubeadm, kubelet, kubectl, and cri-tools packages.
 4. Reuses Docker's `containerd.io` when present instead of installing the
    conflicting Ubuntu `containerd` package.
 5. Configures containerd, kernel modules, forwarding, and swap.
@@ -306,6 +306,8 @@ to `sudo kuiqctl recreate --yes`.
 During `recreate`, kuiqctl stops kubelet, resets every detected CRI socket
 (including older CRI-O installations), removes owned CNI state, and waits for
 old control-plane ports to close before initializing the replacement cluster.
+The destructive confirmation flag is accepted on either side of the command:
+`sudo kuiqctl recreate --yes` and `sudo kuiqctl --yes recreate` are equivalent.
 
 ## Troubleshooting
 

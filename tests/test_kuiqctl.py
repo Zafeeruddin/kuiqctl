@@ -37,6 +37,23 @@ class ConfigTests(unittest.TestCase):
         with mock.patch.object(kuiqctl.shutil, "which", return_value=None):
             self.assertIn("containerd", kuiqctl.prerequisite_packages())
 
+    def test_installs_and_holds_cri_tools_with_kubernetes_packages(self):
+        self.assertIn("cri-tools", kuiqctl.KUBERNETES_PACKAGES)
+
+    def test_package_stack_requires_crictl(self):
+        config = kuiqctl.defaults()
+
+        def which(binary):
+            return None if binary == "crictl" else f"/usr/bin/{binary}"
+
+        with mock.patch.object(kuiqctl.shutil, "which", side_effect=which):
+            self.assertFalse(kuiqctl.package_stack_ready(config))
+
+    def test_missing_command_is_reported_without_a_traceback(self):
+        with mock.patch.object(kuiqctl.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(kuiqctl.KuiqctlError, "required command not found: crictl"):
+                kuiqctl.run(["crictl", "info"])
+
     def test_create_preflight_points_stale_ports_to_recreate(self):
         with (
             mock.patch.object(kuiqctl, "occupied_control_plane_ports", return_value=[10257, 10259]),
@@ -126,6 +143,28 @@ class ArtifactPreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(kuiqctl.KuiqctlError, "artifact unavailable"):
                 kuiqctl.recreate(config, True)
         reset.assert_not_called()
+
+
+class CliTests(unittest.TestCase):
+    def test_yes_is_accepted_before_recreate(self):
+        args = kuiqctl.parser().parse_args(["--yes", "recreate"])
+        self.assertTrue(args.yes)
+
+    def test_yes_is_accepted_after_recreate(self):
+        args = kuiqctl.parser().parse_args(["recreate", "--yes"])
+        self.assertTrue(args.yes)
+
+    def test_yes_is_accepted_before_and_after_remove(self):
+        self.assertTrue(kuiqctl.parser().parse_args(["--yes", "remove"]).yes)
+        self.assertTrue(kuiqctl.parser().parse_args(["remove", "--yes"]).yes)
+
+    def test_yes_is_rejected_for_non_destructive_commands(self):
+        with (
+            mock.patch.object(kuiqctl, "require_root"),
+            mock.patch("sys.stderr", new=io.StringIO()),
+            self.assertRaisesRegex(SystemExit, "2"),
+        ):
+            kuiqctl.main(["--yes", "create"])
 
 
 class DoctorTests(unittest.TestCase):

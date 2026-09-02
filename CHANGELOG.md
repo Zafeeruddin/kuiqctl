@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Install and validate the `cri-tools` dependency used to pre-pull Calico
+  images, and report missing executables without a Python traceback.
+- Accept the destructive `--yes` confirmation flag before or after `recreate`
+  and `remove`.
 - Add `kuiqctl doctor` for actionable checks of an existing cluster, its
   stable node identity, roaming endpoint, services, API, node, and Calico.
 - Add a guarded `uninstall.sh` that preserves configuration by default and
