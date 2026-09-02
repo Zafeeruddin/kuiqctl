@@ -176,6 +176,27 @@ class ArtifactPreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(kuiqctl.KuiqctlError, "no usable default IPv4 route"):
                 kuiqctl.resolve_required_hosts(config)
 
+    def test_calico_pull_uses_containerd_for_runtime_and_images(self):
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with (
+            mock.patch.object(kuiqctl, "calico_images", return_value=["quay.io/calico/cni:v3.32.1"]),
+            mock.patch.object(kuiqctl, "run", return_value=completed) as run,
+        ):
+            kuiqctl.pull_required_images()
+        command = run.call_args_list[1].args[0]
+        self.assertEqual(
+            command,
+            [
+                "crictl",
+                "--runtime-endpoint",
+                kuiqctl.CRI_SOCKET,
+                "--image-endpoint",
+                kuiqctl.CRI_SOCKET,
+                "pull",
+                "quay.io/calico/cni:v3.32.1",
+            ],
+        )
+
     def test_recreate_prepares_artifacts_before_reset(self):
         config = kuiqctl.defaults()
         config["endpoint"] = "server.local"

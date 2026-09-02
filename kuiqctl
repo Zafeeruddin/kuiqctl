@@ -552,7 +552,15 @@ def pull_required_images() -> None:
     for image in calico_images():
         try:
             result = run(
-                ["crictl", "--runtime-endpoint", CRI_SOCKET, "pull", image],
+                [
+                    "crictl",
+                    "--runtime-endpoint",
+                    CRI_SOCKET,
+                    "--image-endpoint",
+                    CRI_SOCKET,
+                    "pull",
+                    image,
+                ],
                 check=False,
                 capture=True,
                 timeout=600,
