@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Force-remove CRI containers and pod sandboxes left behind by kubeadm's
+  best-effort reset before checking that control-plane ports were released.
 - Configure `~/.kube/config` for the invoking user after successful creation,
   merging with an existing file so `kubectl` works without extra exports.
 - Pin both crictl's runtime and image-service endpoints to containerd when

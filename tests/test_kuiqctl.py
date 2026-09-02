@@ -197,6 +197,18 @@ class ArtifactPreflightTests(unittest.TestCase):
             ],
         )
 
+    def test_cri_cleanup_force_removes_containers_and_pod_sandboxes(self):
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(kuiqctl, "run", return_value=completed) as run:
+            kuiqctl.remove_remaining_cri_workloads(kuiqctl.CRI_SOCKET)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                kuiqctl.crictl_command(kuiqctl.CRI_SOCKET, "rm", "--force", "--all"),
+                kuiqctl.crictl_command(kuiqctl.CRI_SOCKET, "rmp", "--force", "--all"),
+            ],
+        )
+
     def test_recreate_prepares_artifacts_before_reset(self):
         config = kuiqctl.defaults()
         config["endpoint"] = "server.local"

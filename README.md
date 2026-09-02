@@ -304,8 +304,9 @@ occupied control-plane ports produce a concise message directing the operator
 to `sudo kuiqctl recreate --yes`.
 
 During `recreate`, kuiqctl stops kubelet, resets every detected CRI socket
-(including older CRI-O installations), removes owned CNI state, and waits for
-old control-plane ports to close before initializing the replacement cluster.
+(including older CRI-O installations), force-removes any CRI workloads that
+survive kubeadm's best-effort reset, removes owned CNI state, and waits for old
+control-plane ports to close before initializing the replacement cluster.
 The destructive confirmation flag is accepted on either side of the command:
 `sudo kuiqctl recreate --yes` and `sudo kuiqctl --yes recreate` are equivalent.
 

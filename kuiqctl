@@ -268,6 +268,32 @@ def available_cri_sockets() -> list[str]:
     return sockets or [CRI_SOCKET]
 
 
+def crictl_command(cri_socket: str, *args: str) -> list[str]:
+    return [
+        "crictl",
+        "--runtime-endpoint",
+        cri_socket,
+        "--image-endpoint",
+        cri_socket,
+        *args,
+    ]
+
+
+def remove_remaining_cri_workloads(cri_socket: str) -> None:
+    # kubeadm reset is best-effort. Force-remove only workloads exposed by
+    # this CRI endpoint if static control-plane containers survived it.
+    run(
+        crictl_command(cri_socket, "rm", "--force", "--all"),
+        check=False,
+        capture=True,
+    )
+    run(
+        crictl_command(cri_socket, "rmp", "--force", "--all"),
+        check=False,
+        capture=True,
+    )
+
+
 def download(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "kuiqctl/1"})
     try:
@@ -552,15 +578,7 @@ def pull_required_images() -> None:
     for image in calico_images():
         try:
             result = run(
-                [
-                    "crictl",
-                    "--runtime-endpoint",
-                    CRI_SOCKET,
-                    "--image-endpoint",
-                    CRI_SOCKET,
-                    "pull",
-                    image,
-                ],
+                crictl_command(CRI_SOCKET, "pull", image),
                 check=False,
                 capture=True,
                 timeout=600,
@@ -712,6 +730,7 @@ def reset_cluster(cfg: dict, *, remove_alias: bool) -> None:
                 ["kubeadm", "reset", "--force", "--cri-socket", cri_socket],
                 check=False,
             )
+            remove_remaining_cri_workloads(cri_socket)
     for path in [pathlib.Path("/etc/cni/net.d/10-calico.conflist"), pathlib.Path("/etc/cni/net.d/calico-kubeconfig")]:
         path.unlink(missing_ok=True)
     for interface in ["cni0", "tunl0", "vxlan.calico"]:
