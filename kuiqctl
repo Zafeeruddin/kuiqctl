@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import pwd
 import re
 import shutil
 import socket
@@ -663,8 +664,18 @@ def initialize_cluster(cfg: dict) -> None:
     install_calico(cfg)
     wait_ready()
     enable_agent()
+    try:
+        destination = install_default_kubeconfig(cfg)
+    except (KuiqctlError, OSError) as exc:
+        print(
+            f"Warning: cluster is ready, but could not configure kubectl for the invoking user: {exc}. "
+            "Run 'sudo kuiqctl kubeconfig --output \"$HOME/.kube/kuiqctl.yaml\"' manually.",
+            file=sys.stderr,
+        )
+        destination = None
     print(f"Cluster is ready at https://{cfg['endpoint']}:6443")
-    print("Export its kubeconfig with: sudo kuiqctl kubeconfig --output ~/.kube/kuiqctl.yaml")
+    if destination:
+        print(f"kubectl is configured via {destination}; check the node with: kubectl get nodes")
 
 
 def create(cfg: dict) -> None:
@@ -735,6 +746,68 @@ def rewrite_kubeconfig(text: str, endpoint: str, cluster_name: str) -> str:
     return text
 
 
+def invoking_user() -> tuple[str, pathlib.Path, int, int]:
+    raw_uid = os.environ.get("SUDO_UID")
+    try:
+        uid = int(raw_uid) if raw_uid is not None else os.getuid()
+        account = pwd.getpwuid(uid)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise KuiqctlError("could not identify the user who invoked sudo") from exc
+    return account.pw_name, pathlib.Path(account.pw_dir), uid, account.pw_gid
+
+
+def write_user_file(destination: pathlib.Path, content: str, uid: int, gid: int) -> None:
+    parent_existed = destination.parent.exists()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not parent_existed:
+        os.chmod(destination.parent, 0o700)
+        os.chown(destination.parent, uid, gid)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            prefix=f".{destination.name}.",
+            dir=destination.parent,
+            delete=False,
+        ) as handle:
+            handle.write(content)
+            temporary = pathlib.Path(handle.name)
+        os.chmod(temporary, 0o600)
+        os.chown(temporary, uid, gid)
+        temporary.replace(destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def install_default_kubeconfig(cfg: dict) -> pathlib.Path:
+    if not ADMIN_CONF.exists():
+        raise KuiqctlError("cluster kubeconfig does not exist")
+    username, home, uid, gid = invoking_user()
+    destination = home / ".kube" / "config"
+    content = rewrite_kubeconfig(ADMIN_CONF.read_text(), cfg["endpoint"], cfg["cluster_name"])
+    if destination.exists():
+        source = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", prefix="kuiqctl-kubeconfig-", delete=False) as handle:
+                handle.write(content)
+                source = pathlib.Path(handle.name)
+            os.chmod(source, 0o600)
+            env = os.environ.copy()
+            env["KUBECONFIG"] = f"{source}{os.pathsep}{destination}"
+            content = run(
+                ["kubectl", "config", "view", "--flatten", "--raw"],
+                capture=True,
+                env=env,
+            ).stdout
+        finally:
+            if source is not None:
+                source.unlink(missing_ok=True)
+    write_user_file(destination, content, uid, gid)
+    print(f"Configured kubectl for {username} at {destination}")
+    return destination
+
+
 def kubeconfig(cfg: dict, output: str | None) -> None:
     require_root()
     if not ADMIN_CONF.exists():
@@ -744,17 +817,10 @@ def kubeconfig(cfg: dict, output: str | None) -> None:
         sys.stdout.write(content)
         return
     destination = pathlib.Path(output).expanduser()
-    parent_existed = destination.parent.exists()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
-    temporary.write_text(content)
-    os.chmod(temporary, 0o600)
-    temporary.replace(destination)
     sudo_uid, sudo_gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
-    if sudo_uid and sudo_gid:
-        os.chown(destination, int(sudo_uid), int(sudo_gid))
-        if not parent_existed:
-            os.chown(destination.parent, int(sudo_uid), int(sudo_gid))
+    uid = int(sudo_uid) if sudo_uid else os.getuid()
+    gid = int(sudo_gid) if sudo_gid else os.getgid()
+    write_user_file(destination, content, uid, gid)
     print(f"Wrote {destination}")
 
 

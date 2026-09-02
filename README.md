@@ -56,15 +56,13 @@ cd kuiqctl
 sudo ./install.sh
 kuiqctl --version
 sudo kuiqctl create
-```
-
-Export the administrator kubeconfig and verify the cluster:
-
-```bash
-sudo kuiqctl kubeconfig --output "$HOME/.kube/kuiqctl.yaml"
-export KUBECONFIG="$HOME/.kube/kuiqctl.yaml"
 kubectl get nodes
 ```
+
+After creation, kuiqctl installs the administrator kubeconfig at
+`~/.kube/config` for the user who invoked `sudo`. If that file already exists,
+the new cluster is merged into it so other contexts are preserved. The
+`kuiqctl kubeconfig` command remains available for exporting to another path.
 
 `install.sh` installs the CLI at `/usr/local/bin/kuiqctl`, configuration at
 `/etc/kuiqctl/config.json`, and the network watcher as a systemd service. After
@@ -268,6 +266,8 @@ During `create` or `recreate`, kuiqctl makes these host-level changes:
 - Writes generated kubeadm input to `/etc/kubernetes/kuiqctl-kubeadm.yaml`.
   kubeadm then owns its normal state under `/etc/kubernetes`, `/var/lib/etcd`,
   and `/var/lib/kubelet`.
+- Installs or merges the cluster credentials into `~/.kube/config` for the
+  user who invoked `sudo`, with user ownership and restrictive permissions.
 - Caches the pinned Calico manifest at `/var/cache/kuiqctl/calico.yaml` and
   installs Calico's normal Kubernetes and CNI state.
 - When UFW is active, adds TCP/6443 allow rules for each configured

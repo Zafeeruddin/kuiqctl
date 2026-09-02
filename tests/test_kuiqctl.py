@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -88,6 +89,54 @@ class KubeconfigTests(unittest.TestCase):
         self.assertIn("https://node.local:6443", result)
         self.assertNotIn("kubernetes-admin", result)
         self.assertEqual(result.count("demo"), 2)
+
+    def test_installs_default_kubeconfig_for_invoking_user(self):
+        config = kuiqctl.defaults()
+        config["endpoint"] = "node.local"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            admin = root / "admin.conf"
+            admin.write_text(
+                "server: https://10.255.255.1:6443\n"
+                "name: kubernetes\n"
+                "current-context: kubernetes-admin\n"
+            )
+            with (
+                mock.patch.object(kuiqctl, "ADMIN_CONF", admin),
+                mock.patch.object(kuiqctl, "invoking_user", return_value=("alice", root, 1000, 1000)),
+                mock.patch.object(kuiqctl.os, "chown"),
+            ):
+                destination = kuiqctl.install_default_kubeconfig(config)
+            rendered = destination.read_text()
+            self.assertEqual(destination, root / ".kube" / "config")
+            self.assertIn("https://node.local:6443", rendered)
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(destination.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_merges_an_existing_default_kubeconfig(self):
+        config = kuiqctl.defaults()
+        config["endpoint"] = "node.local"
+        completed = subprocess.CompletedProcess(
+            ["kubectl"], 0, stdout="merged kubeconfig\n", stderr=""
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            admin = root / "admin.conf"
+            admin.write_text("server: https://10.255.255.1:6443\n")
+            destination = root / ".kube" / "config"
+            destination.parent.mkdir()
+            destination.write_text("existing kubeconfig\n")
+            with (
+                mock.patch.object(kuiqctl, "ADMIN_CONF", admin),
+                mock.patch.object(kuiqctl, "invoking_user", return_value=("alice", root, 1000, 1000)),
+                mock.patch.object(kuiqctl.os, "chown"),
+                mock.patch.object(kuiqctl, "run", return_value=completed) as run,
+            ):
+                kuiqctl.install_default_kubeconfig(config)
+            self.assertEqual(destination.read_text(), "merged kubeconfig\n")
+            self.assertEqual(run.call_args.args[0], ["kubectl", "config", "view", "--flatten", "--raw"])
+            kubeconfigs = run.call_args.kwargs["env"]["KUBECONFIG"].split(os.pathsep)
+            self.assertEqual(pathlib.Path(kubeconfigs[1]), destination)
 
 
 class KubeadmConfigTests(unittest.TestCase):

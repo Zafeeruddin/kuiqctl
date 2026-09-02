@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Configure `~/.kube/config` for the invoking user after successful creation,
+  merging with an existing file so `kubectl` works without extra exports.
 - Install and validate the `cri-tools` dependency used to pre-pull Calico
   images, and report missing executables without a Python traceback.
 - Accept the destructive `--yes` confirmation flag before or after `recreate`
