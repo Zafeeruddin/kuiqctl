@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Detect and terminate verified stale control-plane processes that continue
+  holding Kubernetes ports after kubeadm and CRI cleanup.
 - Force-remove CRI containers and pod sandboxes left behind by kubeadm's
   best-effort reset before checking that control-plane ports were released.
 - Configure `~/.kube/config` for the invoking user after successful creation,

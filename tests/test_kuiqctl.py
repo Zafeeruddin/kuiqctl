@@ -209,6 +209,40 @@ class ArtifactPreflightTests(unittest.TestCase):
             ],
         )
 
+    def test_port_owner_parser_extracts_every_pid(self):
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout='LISTEN 0 4096 127.0.0.1:10259 0.0.0.0:* users:(("kube-scheduler",pid=2999,fd=3))\n',
+            stderr="",
+        )
+        with mock.patch.object(kuiqctl, "run", return_value=completed):
+            self.assertEqual(kuiqctl.port_owner_pids(10259), {2999})
+
+    def test_stale_control_plane_cleanup_kills_only_matching_components(self):
+        owners = {10257: {3001}, 10259: {2999}, 6443: {4000}}
+        active = {3001, 2999, 4000}
+
+        def matches(pid, expected):
+            return pid in active and (pid, expected) in {
+                (3001, "kube-controller-manager"),
+                (2999, "kube-scheduler"),
+            }
+
+        def kill_process(pid, _signal):
+            active.discard(pid)
+
+        with (
+            mock.patch.object(kuiqctl, "port_owner_pids", side_effect=lambda port: owners.get(port, set())),
+            mock.patch.object(kuiqctl, "process_matches", side_effect=matches),
+            mock.patch.object(kuiqctl.os, "kill", side_effect=kill_process) as kill,
+        ):
+            kuiqctl.stop_stale_control_plane_processes()
+        self.assertEqual(
+            {call.args for call in kill.call_args_list},
+            {(3001, kuiqctl.signal.SIGTERM), (2999, kuiqctl.signal.SIGTERM)},
+        )
+
     def test_recreate_prepares_artifacts_before_reset(self):
         config = kuiqctl.defaults()
         config["endpoint"] = "server.local"

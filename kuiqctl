@@ -13,6 +13,7 @@ import os
 import pathlib
 import pwd
 import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -34,6 +35,13 @@ CACHE_DIR = pathlib.Path("/var/cache/kuiqctl")
 CALICO_MANIFEST = CACHE_DIR / "calico.yaml"
 CRI_SOCKET = "unix:///run/containerd/containerd.sock"
 CONTROL_PLANE_PORTS = (6443, 10257, 10259, 2379, 2380)
+CONTROL_PLANE_PROCESSES = {
+    6443: "kube-apiserver",
+    10257: "kube-controller-manager",
+    10259: "kube-scheduler",
+    2379: "etcd",
+    2380: "etcd",
+}
 KUBERNETES_KEY_URL = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/Release.key"
 KUBERNETES_REPO = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/"
 KUBERNETES_PACKAGES = ("kubelet", "kubeadm", "kubectl", "cri-tools")
@@ -251,6 +259,59 @@ def wait_for_control_plane_ports(timeout: int = 30) -> None:
         + ", ".join(map(str, occupied_control_plane_ports()))
         + "; inspect them with: sudo ss -ltnp"
     )
+
+
+def port_owner_pids(port: int) -> set[int]:
+    result = run(
+        ["ss", "-H", "-ltnp", "sport", "=", f":{port}"],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        return set()
+    return {int(value) for value in re.findall(r"\bpid=(\d+)", result.stdout)}
+
+
+def process_matches(pid: int, expected: str) -> bool:
+    candidates = set()
+    try:
+        command = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
+        if command:
+            candidates.add(pathlib.Path(os.fsdecode(command)).name)
+    except OSError:
+        pass
+    try:
+        candidates.add(pathlib.Path(os.readlink(f"/proc/{pid}/exe")).name.removesuffix(" (deleted)"))
+    except OSError:
+        pass
+    return expected in candidates
+
+
+def stop_stale_control_plane_processes(timeout: int = 5) -> None:
+    targets = {}
+    for port, expected in CONTROL_PLANE_PROCESSES.items():
+        for pid in port_owner_pids(port):
+            if process_matches(pid, expected):
+                targets[pid] = expected
+                print(f"Stopping stale {expected} process {pid} on port {port}...")
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+    if not targets:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(process_matches(pid, expected) for pid, expected in targets.items()):
+            return
+        time.sleep(0.2)
+    for pid, expected in targets.items():
+        if process_matches(pid, expected):
+            print(f"Force-stopping stale {expected} process {pid}...")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def available_cri_sockets() -> list[str]:
@@ -731,6 +792,7 @@ def reset_cluster(cfg: dict, *, remove_alias: bool) -> None:
                 check=False,
             )
             remove_remaining_cri_workloads(cri_socket)
+    stop_stale_control_plane_processes()
     for path in [pathlib.Path("/etc/cni/net.d/10-calico.conflist"), pathlib.Path("/etc/cni/net.d/calico-kubeconfig")]:
         path.unlink(missing_ok=True)
     for interface in ["cni0", "tunl0", "vxlan.calico"]:
