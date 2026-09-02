@@ -236,6 +236,26 @@ class ArtifactPreflightTests(unittest.TestCase):
             ],
         )
 
+    def test_workloads_are_removed_before_control_plane_with_proxy_last(self):
+        payload = json.dumps(
+            {
+                "items": [
+                    {"id": "api", "metadata": {"name": "kube-apiserver-node"}},
+                    {"id": "proxy", "metadata": {"name": "kube-proxy-abc"}},
+                    {"id": "calico", "metadata": {"name": "calico-node-abc"}},
+                    {"id": "dns", "metadata": {"name": "coredns-abc"}},
+                ]
+            }
+        )
+        listed = subprocess.CompletedProcess([], 0, stdout=payload, stderr="")
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(kuiqctl, "run", side_effect=[listed] + [completed] * 6) as run:
+            kuiqctl.remove_non_control_plane_cri_workloads(kuiqctl.CRI_SOCKET)
+        commands = [call.args[0] for call in run.call_args_list[1:]]
+        stopped = [command[-1] for command in commands if "stopp" in command]
+        self.assertEqual(stopped, ["calico", "dns", "proxy"])
+        self.assertNotIn("api", stopped)
+
     def test_port_owner_parser_extracts_every_pid(self):
         completed = subprocess.CompletedProcess(
             [],

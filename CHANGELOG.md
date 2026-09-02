@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tear down non-control-plane sandboxes while the old API is still available,
+  keeping kube-proxy until last so Calico CNI deletion can complete.
+- Repeat verified stale-process cleanup while waiting for control-plane ports,
+  including Linux's truncated process names.
 - Keep the stable loopback API endpoint in the invoking user's local default
   kubeconfig and fully rename its context, avoiding DNS/proxy interception and
   collisions with an existing kubeadm context.

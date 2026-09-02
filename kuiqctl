@@ -253,6 +253,7 @@ def wait_for_control_plane_ports(timeout: int = 30) -> None:
         ports = occupied_control_plane_ports()
         if not ports:
             return
+        stop_stale_control_plane_processes()
         time.sleep(1)
     raise KuiqctlError(
         "recreate cleanup could not release control-plane ports "
@@ -284,7 +285,11 @@ def process_matches(pid: int, expected: str) -> bool:
         candidates.add(pathlib.Path(os.readlink(f"/proc/{pid}/exe")).name.removesuffix(" (deleted)"))
     except OSError:
         pass
-    return expected in candidates
+    try:
+        candidates.add(pathlib.Path(f"/proc/{pid}/comm").read_text().strip())
+    except OSError:
+        pass
+    return expected in candidates or expected[:15] in candidates
 
 
 def stop_stale_control_plane_processes(timeout: int = 5) -> None:
@@ -353,6 +358,40 @@ def remove_remaining_cri_workloads(cri_socket: str) -> None:
         check=False,
         capture=True,
     )
+
+
+def remove_non_control_plane_cri_workloads(cri_socket: str) -> None:
+    result = run(
+        crictl_command(cri_socket, "pods", "--output", "json"),
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        return
+    try:
+        items = json.loads(result.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return
+    control_plane_names = set(CONTROL_PLANE_PROCESSES.values())
+
+    def pod_name(item: dict) -> str:
+        return item.get("metadata", {}).get("name", "")
+
+    def is_control_plane(name: str) -> bool:
+        return any(name == component or name.startswith(f"{component}-") for component in control_plane_names)
+
+    workloads = [
+        item
+        for item in items
+        if item.get("id") and pod_name(item) and not is_control_plane(pod_name(item))
+    ]
+    # Keep kube-proxy available until other CNI sandboxes have been removed so
+    # the Kubernetes service IP continues forwarding to the live API server.
+    workloads.sort(key=lambda item: (pod_name(item).startswith("kube-proxy-"), pod_name(item)))
+    for item in workloads:
+        sandbox_id = item["id"]
+        run(crictl_command(cri_socket, "stopp", sandbox_id), check=False, capture=True)
+        run(crictl_command(cri_socket, "rmp", "--force", sandbox_id), check=False, capture=True)
 
 
 def download(url: str) -> bytes:
@@ -786,7 +825,12 @@ def reset_cluster(cfg: dict, *, remove_alias: bool) -> None:
         # A previous cluster may have used CRI-O while the new default is
         # containerd. Reset every live CRI so old static Pods cannot retain
         # scheduler/controller/etcd ports after the filesystem was cleaned.
-        for cri_socket in available_cri_sockets():
+        cri_sockets = available_cri_sockets()
+        # Calico's CNI delete operation queries the Kubernetes API. Remove
+        # workload sandboxes before kubeadm stops the static API server.
+        for cri_socket in cri_sockets:
+            remove_non_control_plane_cri_workloads(cri_socket)
+        for cri_socket in cri_sockets:
             run(
                 ["kubeadm", "reset", "--force", "--cri-socket", cri_socket],
                 check=False,

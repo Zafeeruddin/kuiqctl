@@ -306,12 +306,13 @@ occupied control-plane ports produce a concise message directing the operator
 to `sudo kuiqctl recreate --yes`.
 
 During `recreate`, kuiqctl stops kubelet, resets every detected CRI socket
-(including older CRI-O installations), force-removes any CRI workloads that
-survive kubeadm's best-effort reset, and terminates verified stale Kubernetes
-components still holding their reserved ports. It removes owned CNI state and
-waits for all control-plane ports to close before initializing the replacement
-cluster. Processes that do not match the expected Kubernetes component are
-never killed automatically.
+(including older CRI-O installations), and force-removes any CRI workloads that
+survive kubeadm's best-effort reset. Non-control-plane sandboxes are removed
+first while the old API is still available, allowing Calico CNI teardown to
+complete. It then terminates verified stale Kubernetes components still holding
+their reserved ports, removes owned CNI state, and waits for all control-plane
+ports to close before initializing the replacement cluster. Processes that do
+not match the expected Kubernetes component are never killed automatically.
 The destructive confirmation flag is accepted on either side of the command:
 `sudo kuiqctl recreate --yes` and `sudo kuiqctl --yes recreate` are equivalent.
 
