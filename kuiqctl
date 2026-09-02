@@ -753,7 +753,7 @@ def initialize_cluster(cfg: dict) -> None:
     enable_agent()
     try:
         destination = install_default_kubeconfig(cfg)
-    except (KuiqctlError, OSError) as exc:
+    except (KuiqctlError, OSError, subprocess.CalledProcessError) as exc:
         print(
             f"Warning: cluster is ready, but could not configure kubectl for the invoking user: {exc}. "
             "Run 'sudo kuiqctl kubeconfig --output \"$HOME/.kube/kuiqctl.yaml\"' manually.",
@@ -829,12 +829,41 @@ def rewrite_kubeconfig(text: str, endpoint: str | None, cluster_name: str) -> st
     if endpoint:
         text = re.sub(r"https://[^:\s]+:6443", f"https://{endpoint}:6443", text, count=1)
     text = re.sub(
-        r"(?m)^(\s*(?:name|cluster|user|current-context):\s*)"
-        r"(?:kubernetes|kubernetes-admin|kubernetes-admin@kubernetes)(\s*)$",
+        r"(?m)^(\s*(?:-\s*)?(?:name|cluster|user|current-context):\s*)"
+        r"(?:kubernetes|kubernetes-admin|kubernetes-admin@[^\s]+)(\s*)$",
         rf"\g<1>{cluster_name}\g<2>",
         text,
     )
     return text
+
+
+def validate_kubeconfig_content(content: str, cluster_name: str) -> None:
+    source = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", prefix="kuiqctl-validate-", delete=False) as handle:
+            handle.write(content)
+            source = pathlib.Path(handle.name)
+        os.chmod(source, 0o600)
+        result = run(
+            ["kubectl", "config", "view", "--kubeconfig", str(source), "--minify", "--raw", "-o", "json"],
+            capture=True,
+        )
+        rendered = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise KuiqctlError("generated kubeconfig could not be validated") from exc
+    finally:
+        if source is not None:
+            source.unlink(missing_ok=True)
+    contexts = rendered.get("contexts", [])
+    users = rendered.get("users", [])
+    clusters = rendered.get("clusters", [])
+    if (
+        rendered.get("current-context") != cluster_name
+        or not any(item.get("name") == cluster_name for item in contexts)
+        or not any(item.get("name") == cluster_name for item in users)
+        or not any(item.get("name") == cluster_name for item in clusters)
+    ):
+        raise KuiqctlError("generated kubeconfig has inconsistent cluster, context, or user references")
 
 
 def invoking_user() -> tuple[str, pathlib.Path, int, int]:
@@ -896,6 +925,7 @@ def install_default_kubeconfig(cfg: dict) -> pathlib.Path:
         finally:
             if source is not None:
                 source.unlink(missing_ok=True)
+    validate_kubeconfig_content(content, cfg["cluster_name"])
     write_user_file(destination, content, uid, gid)
     print(f"Configured kubectl for {username} at {destination}")
     return destination

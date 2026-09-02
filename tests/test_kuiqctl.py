@@ -86,16 +86,17 @@ class KubeconfigTests(unittest.TestCase):
     def test_rewrites_endpoint_and_names(self):
         original = (
             "server: https://10.255.255.1:6443\n"
-            "name: kubernetes\n"
+            "- name: kubernetes\n"
             "cluster: kubernetes\n"
             "user: kubernetes-admin\n"
-            "name: kubernetes-admin@kubernetes\n"
-            "current-context: kubernetes-admin@kubernetes\n"
+            "- name: kubernetes-admin@demo\n"
+            "current-context: kubernetes-admin@demo\n"
+            "- name: kubernetes-admin\n"
         )
         result = kuiqctl.rewrite_kubeconfig(original, "node.local", "demo")
         self.assertIn("https://node.local:6443", result)
         self.assertNotIn("kubernetes-admin", result)
-        self.assertEqual(result.count("demo"), 5)
+        self.assertEqual(result.count("demo"), 6)
 
     def test_installs_default_kubeconfig_for_invoking_user(self):
         config = kuiqctl.defaults()
@@ -112,6 +113,7 @@ class KubeconfigTests(unittest.TestCase):
                 mock.patch.object(kuiqctl, "ADMIN_CONF", admin),
                 mock.patch.object(kuiqctl, "invoking_user", return_value=("alice", root, 1000, 1000)),
                 mock.patch.object(kuiqctl.os, "chown"),
+                mock.patch.object(kuiqctl, "validate_kubeconfig_content") as validate,
             ):
                 destination = kuiqctl.install_default_kubeconfig(config)
             rendered = destination.read_text()
@@ -120,6 +122,7 @@ class KubeconfigTests(unittest.TestCase):
             self.assertNotIn("https://node.local:6443", rendered)
             self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
             self.assertEqual(destination.parent.stat().st_mode & 0o777, 0o700)
+            validate.assert_called_once()
 
     def test_merges_an_existing_default_kubeconfig(self):
         config = kuiqctl.defaults()
@@ -139,12 +142,28 @@ class KubeconfigTests(unittest.TestCase):
                 mock.patch.object(kuiqctl, "invoking_user", return_value=("alice", root, 1000, 1000)),
                 mock.patch.object(kuiqctl.os, "chown"),
                 mock.patch.object(kuiqctl, "run", return_value=completed) as run,
+                mock.patch.object(kuiqctl, "validate_kubeconfig_content") as validate,
             ):
                 kuiqctl.install_default_kubeconfig(config)
             self.assertEqual(destination.read_text(), "merged kubeconfig\n")
             self.assertEqual(run.call_args.args[0], ["kubectl", "config", "view", "--flatten", "--raw"])
             kubeconfigs = run.call_args.kwargs["env"]["KUBECONFIG"].split(os.pathsep)
             self.assertEqual(pathlib.Path(kubeconfigs[1]), destination)
+            validate.assert_called_once_with("merged kubeconfig\n", config["cluster_name"])
+
+    def test_rejects_kubeconfig_with_a_missing_named_user(self):
+        rendered = json.dumps(
+            {
+                "current-context": "kuiqctl",
+                "clusters": [{"name": "kuiqctl"}],
+                "contexts": [{"name": "kuiqctl"}],
+                "users": [{"name": "kubernetes-admin"}],
+            }
+        )
+        completed = subprocess.CompletedProcess(["kubectl"], 0, stdout=rendered, stderr="")
+        with mock.patch.object(kuiqctl, "run", return_value=completed):
+            with self.assertRaisesRegex(kuiqctl.KuiqctlError, "inconsistent"):
+                kuiqctl.validate_kubeconfig_content("content", "kuiqctl")
 
 
 class KubeadmConfigTests(unittest.TestCase):
