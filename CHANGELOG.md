@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Make `kuiqctl kubeconfig` repair the invoking user's default kubectl config;
+  keep explicit `--output` exports and validate certificate credentials before
+  writing or printing them.
 - Tear down non-control-plane sandboxes while the old API is still available,
   keeping kube-proxy until last so Calico CNI deletion can complete.
 - Repeat verified stale-process cleanup while waiting for control-plane ports,

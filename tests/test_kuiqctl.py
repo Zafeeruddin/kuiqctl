@@ -4,6 +4,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -83,6 +84,111 @@ class ConfigTests(unittest.TestCase):
 
 
 class KubeconfigTests(unittest.TestCase):
+    ADMIN_YAML = """apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: Y2E=
+    server: https://10.255.255.1:6443
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: kubernetes-admin
+  name: kubernetes-admin@kubernetes
+current-context: kubernetes-admin@kubernetes
+users:
+- name: kubernetes-admin
+  user:
+    client-certificate-data: Y2VydA==
+    client-key-data: a2V5
+"""
+
+    def test_no_output_repairs_default_configuration(self):
+        config = kuiqctl.defaults()
+        with (
+            mock.patch.object(kuiqctl, "require_root"),
+            mock.patch.object(kuiqctl, "install_default_kubeconfig") as install,
+        ):
+            kuiqctl.kubeconfig(config, None)
+        install.assert_called_once_with(config)
+
+    def test_export_validation_failure_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            admin = pathlib.Path(directory) / "admin.conf"
+            admin.write_text(self.ADMIN_YAML)
+            destination = pathlib.Path(directory) / "export.yaml"
+            destination.write_text("previous config")
+            with (
+                mock.patch.object(kuiqctl, "require_root"),
+                mock.patch.object(kuiqctl, "ADMIN_CONF", admin),
+                mock.patch.object(kuiqctl, "validate_kubeconfig_content", side_effect=kuiqctl.KuiqctlError("missing credentials")),
+            ):
+                with self.assertRaisesRegex(kuiqctl.KuiqctlError, "missing credentials"):
+                    kuiqctl.kubeconfig(kuiqctl.defaults(), str(destination))
+            self.assertEqual(destination.read_text(), "previous config")
+
+    @unittest.skipUnless(shutil.which("kubectl"), "kubectl is required for config integration checks")
+    def test_real_kubectl_resolves_renamed_credentials_and_refreshes_stale_config(self):
+        config = kuiqctl.defaults()
+        config["cluster_name"] = "quick-prod"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            admin = root / "admin.conf"
+            admin.write_text(self.ADMIN_YAML)
+            destination = root / ".kube" / "config"
+            destination.parent.mkdir()
+            stale = kuiqctl.rewrite_kubeconfig(self.ADMIN_YAML, "192.168.1.11", "quick-prod")
+            stale = stale.replace("Y2E=", "b2xkLWNh").replace("Y2VydA==", "b2xkLWNlcnQ=")
+            # Reproduce the old exporter: context references quick-prod but the
+            # actual user entry remains kubernetes-admin.
+            stale = stale.replace("- name: quick-prod", "- name: kubernetes-admin")
+            other = kuiqctl.rewrite_kubeconfig(self.ADMIN_YAML, "other.local", "other")
+            other_path = root / "other"
+            other_path.write_text(other)
+            destination.write_text(stale)
+            env = os.environ.copy()
+            env["KUBECONFIG"] = f"{destination}{os.pathsep}{other_path}"
+            merged = kuiqctl.run(["kubectl", "config", "view", "--flatten", "--raw"], capture=True, env=env).stdout
+            destination.write_text(merged)
+            with (
+                mock.patch.object(kuiqctl, "ADMIN_CONF", admin),
+                mock.patch.object(kuiqctl, "invoking_user", return_value=("alice", root, os.getuid(), os.getgid())),
+                mock.patch.object(kuiqctl.os, "chown"),
+            ):
+                kuiqctl.install_default_kubeconfig(config)
+            result = kuiqctl.run(["kubectl", "config", "view", "--kubeconfig", str(destination), "--raw", "-o", "json"], capture=True)
+            rendered = json.loads(result.stdout)
+            self.assertEqual(rendered["current-context"], "quick-prod")
+            self.assertIn("other", [item["name"] for item in rendered["contexts"]])
+            user = next(item["user"] for item in rendered["users"] if item["name"] == "quick-prod")
+            self.assertEqual(user["client-certificate-data"], "Y2VydA==")
+            self.assertEqual(user["client-key-data"], "a2V5")
+            cluster = next(item["cluster"] for item in rendered["clusters"] if item["name"] == "quick-prod")
+            self.assertEqual(cluster["certificate-authority-data"], "Y2E=")
+            self.assertEqual(cluster["server"], "https://10.255.255.1:6443")
+
+    def test_rejects_missing_client_credentials_and_ca(self):
+        rendered = {
+            "current-context": "kuiqctl",
+            "clusters": [{"name": "kuiqctl", "cluster": {"certificate-authority-data": "ca"}}],
+            "contexts": [{"name": "kuiqctl", "context": {"cluster": "kuiqctl", "user": "kuiqctl"}}],
+            "users": [{"name": "kuiqctl", "user": {"client-certificate-data": "cert", "client-key-data": "key"}}],
+        }
+        for section, field, error in (
+            ("users", "client-certificate-data", "client certificate"),
+            ("users", "client-key-data", "client certificate"),
+            ("clusters", "certificate-authority-data", "certificate authority"),
+        ):
+            with self.subTest(field=field):
+                invalid = json.loads(json.dumps(rendered))
+                entry = invalid[section][0]["user" if section == "users" else "cluster"]
+                del entry[field]
+                completed = subprocess.CompletedProcess(["kubectl"], 0, stdout=json.dumps(invalid), stderr="")
+                with mock.patch.object(kuiqctl, "run", return_value=completed):
+                    with self.assertRaisesRegex(kuiqctl.KuiqctlError, error):
+                        kuiqctl.validate_kubeconfig_content("content", "kuiqctl")
+
     def test_rewrites_endpoint_and_names(self):
         original = (
             "server: https://10.255.255.1:6443\n"

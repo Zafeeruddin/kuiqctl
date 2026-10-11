@@ -795,7 +795,7 @@ def initialize_cluster(cfg: dict) -> None:
     except (KuiqctlError, OSError, subprocess.CalledProcessError) as exc:
         print(
             f"Warning: cluster is ready, but could not configure kubectl for the invoking user: {exc}. "
-            "Run 'sudo kuiqctl kubeconfig --output \"$HOME/.kube/kuiqctl.yaml\"' manually.",
+            "Run 'sudo kuiqctl kubeconfig' to retry configuring kubectl.",
             file=sys.stderr,
         )
         destination = None
@@ -908,6 +908,15 @@ def validate_kubeconfig_content(content: str, cluster_name: str) -> None:
         or not any(item.get("name") == cluster_name for item in clusters)
     ):
         raise KuiqctlError("generated kubeconfig has inconsistent cluster, context, or user references")
+    context = next(item.get("context", {}) for item in contexts if item.get("name") == cluster_name)
+    user = next(item.get("user", {}) for item in users if item.get("name") == cluster_name)
+    cluster = next(item.get("cluster", {}) for item in clusters if item.get("name") == cluster_name)
+    if context.get("cluster") != cluster_name or context.get("user") != cluster_name:
+        raise KuiqctlError("generated kubeconfig has inconsistent cluster, context, or user references")
+    if not user.get("client-certificate-data") or not user.get("client-key-data"):
+        raise KuiqctlError("generated kubeconfig is missing administrator client certificate credentials")
+    if not cluster.get("certificate-authority-data") or cluster.get("insecure-skip-tls-verify"):
+        raise KuiqctlError("generated kubeconfig is missing a trusted certificate authority")
 
 
 def invoking_user() -> tuple[str, pathlib.Path, int, int]:
@@ -977,10 +986,14 @@ def install_default_kubeconfig(cfg: dict) -> pathlib.Path:
 
 def kubeconfig(cfg: dict, output: str | None) -> None:
     require_root()
+    if output is None:
+        install_default_kubeconfig(cfg)
+        return
     if not ADMIN_CONF.exists():
         raise KuiqctlError("cluster kubeconfig does not exist; create the cluster first")
     content = rewrite_kubeconfig(ADMIN_CONF.read_text(), cfg["endpoint"], cfg["cluster_name"])
-    if not output or output == "-":
+    validate_kubeconfig_content(content, cfg["cluster_name"])
+    if output == "-":
         sys.stdout.write(content)
         return
     destination = pathlib.Path(output).expanduser()
@@ -1373,8 +1386,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("status", help="show cluster and network status")
     commands.add_parser("preflight", help="verify that create can start on this host")
     commands.add_parser("doctor", help="diagnose an existing cluster")
-    export = commands.add_parser("kubeconfig", help="export a roaming kubeconfig")
-    export.add_argument("--output", "-o")
+    export = commands.add_parser("kubeconfig", help="configure kubectl or export a roaming kubeconfig")
+    export.add_argument("--output", "-o", help="export to this path (use - for stdout); otherwise configure ~/.kube/config")
     internal = commands.add_parser("agent", help=argparse.SUPPRESS)
     internal.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("init", help="create a default configuration")

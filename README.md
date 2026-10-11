@@ -66,6 +66,19 @@ local default uses the stable loopback endpoint so host-side `kubectl` does not
 depend on DNS or proxy bypass settings. The `kuiqctl kubeconfig` command remains
 available for exporting a roaming-endpoint configuration to another path.
 
+To repair kubectl access to an existing cluster without recreating it, run:
+
+```bash
+sudo kuiqctl kubeconfig
+kubectl get nodes
+```
+
+This refreshes the cluster's CA and administrator client certificate credentials
+and selects its context in `~/.kube/config`; no username or password is needed.
+Use `sudo kuiqctl kubeconfig --output /path/to/config.yaml` to export a roaming
+configuration, or `--output -` to print it. If your shell sets `KUBECONFIG`,
+unset it to use `~/.kube/config`.
+
 `install.sh` installs the CLI at `/usr/local/bin/kuiqctl`, configuration at
 `/etc/kuiqctl/config.json`, and the network watcher as a systemd service. After
 installation, `kuiqctl` can be run from any directory.
